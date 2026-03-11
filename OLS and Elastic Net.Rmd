@@ -1,0 +1,156 @@
+---
+title: "OLS and Elastic Net"
+author: "Erica"
+date: "2026-03-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Preparation
+```{r, echo = False}
+# load libraries
+library(tidyverse)
+library(glmnet)
+library(caret)
+library(lubridate)
+# load data
+df <- read_csv('final_data.csv')
+df <- df %>%
+  mutate(caldt = as.Date(caldt),
+         year = year(caldt)) %>%
+  arrange(year) %>%
+  drop_na()
+# predictor matrix
+feature_names <- df %>%
+  select (- alpha_ann, - crsp_fundno, - caldt, - year) %>%
+  colnames()
+# storage
+results <- list()
+# initial window
+years <- sort(unique(df$year))
+start_year <- years[1]
+initial_train_end <- start_year + 9
+df <- df %>%
+  arrange(year, crsp_fundno)
+# count observations
+obs_count <- data.frame()
+```
+
+## Main Loop
+```{r}
+for (t in (initial_train_end + 1) : max (years)) {
+  train_full <- df %>%
+    filter (year >= start_year & year <= (t - 1))
+  test_data <- df %>%
+    filter (year == t)
+  if (nrow(test_data) == 0) next
+  # 70/30 split for tuning
+  tune_years <- sort(unique(train_full$year))
+  split_index <- floor(0.7 * length(tune_years))
+  train_years <- tune_years[1:split_index]
+  valid_years <- tune_years[(split_index + 1):length(tune_years)]
+  train_tune <- train_full %>% 
+    filter(year %in% train_years)
+  valid_tune <- train_full %>% 
+    filter(year %in% valid_years)
+  X_train <- train_tune %>% 
+    select (all_of (feature_names)) %>% 
+    as.matrix()
+  y_train <- train_tune $ alpha_ann
+  X_valid <- valid_tune %>%
+    select (all_of (feature_names)) %>%
+    as.matrix()
+  y_valid <- valid_tune $ alpha_ann
+  
+  # ols model
+  ols_model <- lm(
+    alpha_ann ~ . - crsp_fundno - caldt - year,
+    data = train_full
+  )
+  pred_ols <- predict (ols_model, newdata = test_data)
+  
+  # enet tuning ()
+  alphas <- seq (0, 1, by = 0.1)
+  best_rmse <- Inf
+  best_alpha <- NULL
+  best_lambda <- NULL
+  for (a in alphas) {
+    cv_model <- cv.glmnet(
+      X_train,
+      y_train,
+      alpha = a,
+      nfolds = 10
+    )
+    lambda <- cv_model $ lambda.min
+    preds <- predict (cv_model, newx = X_valid, s = lambda)
+    rmse <- sqrt(mean((y_valid - preds)^2))
+    if (rmse < best_rmse){
+      best_rmse <- rmse
+      best_alpha <- a
+      best_lambda <- lambda
+    }
+  }
+  
+  # refit elastic net on expanding window
+  X_full <- train_full %>%
+    select(all_of(feature_names)) %>%
+    as.matrix()
+  y_full <- train_full $ alpha_ann
+  enet_model <- glmnet(
+    X_full,
+    y_full,
+    alpha = best_alpha,
+    lambda = best_lambda
+  )
+  X_test <- test_data %>%
+    select (all_of(feature_names)) %>%
+    as.matrix()
+  pred_enet <- predict (enet_model, newx = X_test)
+  
+  # store predictions
+  temp <- test_data %>%
+  select(crsp_fundno, caldt, alpha_ann) %>%
+  mutate(
+    pred_ols = pred_ols,
+    pred_enet = as.numeric(pred_enet)
+  )
+
+  results[[as.character(t)]] <- temp
+  
+  # count 
+  obs_count <- rbind(
+    obs_count,
+    data.frame(
+      year = t,
+      train_obs = nrow(train_full),
+      valid_obs = nrow(valid_tune),
+      test_obs = nrow(test_data)
+    )
+  )
+}
+```
+
+## View Reults
+```{r}
+results
+```
+
+## Observation Counts
+```{r}
+obs_count
+```
+
+
+
+
+
+
+
+
+
+
+
+
