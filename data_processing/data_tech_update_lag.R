@@ -332,7 +332,9 @@ df_ml <- df_ml %>%
     ends_with("_lag")
   )
 
+write.csv(df_ml, "../data/final_data.csv", row.names = FALSE)
 
+#check how many funds per year
 funds_per_year <- df_ml %>%
   mutate(year = year(caldt)) %>%
   group_by(year) %>%
