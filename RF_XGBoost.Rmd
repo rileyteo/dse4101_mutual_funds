@@ -16,174 +16,179 @@ library(randomForest)
 ## Load dataset
 
 ```{r}
-df = read.csv("final_data.csv")
+df = read.csv("data/final_data.csv")
 df = df %>% mutate(caldt = ymd(caldt))
 head(df)
 ```
 
 
-## Hyperparameter Tuning Helper Function Random Forest
-
+## Main Random Forest Function
 ```{r}
-
-helper_tuning_RF <- function(train_data, target, features) {
-  n_years<- sort(unique(train_data$caldt))
-  n_feats<- length(features)
-  cutoff  <- n_years[floor(length(n_years) * 0.7)] # first 70% - train, last 30 % - split
-  train <- train_data[train_data$caldt <= cutoff, ]
-  validation   <- train_data[train_data$caldt > cutoff, ]
-
-  grid <- expand.grid(
-    ntree = c(200, 500),
-    mtry = c(floor(sqrt(n_feats)), floor(n_feats/3)),
-    nodesize = c(5, 10)
-  )
-  
-  grid$mse <- sapply(seq_len(nrow(grid)), function(i) {
-    m <- randomForest(
-      x = train[, features],
-      y = train[[target]],
-      ntree = grid$ntree[i],
-      mtry = grid$mtry[i],
-      nodesize = grid$nodesize[i]
-    )
-    preds <- predict(m, newdata = validation[, features])
-    mean((validation[[target]] - preds)^2)
-  })
-  
-  return(grid[which.min(grid$mse), ])
-}
-```
-
-
-## Random Forest
-```{r}
-predict_alpha_rf <- function(df, target = "alpha_ann", first_pred_year = 2020) {
+predict_alpha_rf <- function(df, target = "alpha_ann") {
   
   features <- setdiff(names(df), c("crsp_fundno", "caldt", "alpha_ann"))
-  results <- list()
+  n_feats   <- length(features)
+  pred_year <- max(year(df$caldt))
   
-  for (pred_year in seq(first_pred_year, year(max(df$caldt) ))) {
-    train <- df[year(df$caldt) <  pred_year, ] # take all years before pred year to train
-    test  <- df[year(df$caldt) == pred_year, ]
-    
-    best <- helper_tuning_RF(train, target, features)
-    model <- randomForest(
-      x = train[, features],
-      y = train[[target]],
-      ntree = best$ntree,
-      mtry = best$mtry,
-      nodesize = best$nodesize
+  train <- df[year(df$caldt) <  pred_year, ] # take all years before pred year to train
+  test  <- df[year(df$caldt) == pred_year, ]
+  
+  # Hyperparameter Tuning
+  
+  n_years <- sort(unique(year(train$caldt)))
+  cutoff  <- n_years[floor(length(n_years) * 0.7)]
+  tune_train <- train[year(train$caldt) <= cutoff, ]
+  tune_val   <- train[year(train$caldt) >  cutoff, ]
+
+  grid <- expand.grid(
+    ntree    = c(200, 500),
+    mtry     = c(floor(sqrt(n_feats)), floor(n_feats/3)),
+    nodesize = c(5, 10)
+  )
+
+  grid$mse <- sapply(seq_len(nrow(grid)), function(i) {
+    m <- randomForest(
+      x        = tune_train[, features],
+      y        = tune_train[[target]],
+      ntree    = grid$ntree[i],
+      mtry     = grid$mtry[i],
+      nodesize = grid$nodesize[i]
     )
-    
-    preds <- predict(model, newdata = test[, features])
-    mse <- mean((test[[target]] - preds)^2) # mse for all funds in the same year will be equal
-    
-    results[[as.character(pred_year)]] <- data.frame(
-      evaluation_year = pred_year,
-      crsp_fundno = test$crsp_fundno,
-      predicted_alpha  = preds
-    )
-    rf_df <- bind_rows(results)
-  }
-  return(list(rf_predictions = rf_df))
+    preds <- predict(m, newdata = tune_val[, features])
+    mean((tune_val[[target]] - preds)^2)
+  })
+
+  best <- grid[which.min(grid$mse), ]
+  
+  model <- randomForest(
+    x = train[, features],
+    y = train[[target]],
+    ntree = best$ntree,
+    mtry = best$mtry,
+    nodesize = best$nodesize
+  )
+  
+  preds <- predict(model, newdata = test[, features])
+  mse <- mean((test[[target]] - preds)^2) # mse for all funds in the same year will be equal
+  
+  results <- data.frame(
+    evaluation_year = pred_year,
+    crsp_fundno = test$crsp_fundno,
+    predicted_alpha  = preds
+  )
+
+  return(results)
 }
 ```
 
 ## Predict results for random forest
 ```{r}
-results <- predict_alpha_rf(df)
-rf_df <- results$rf_predictions
+rf_df <- predict_alpha_rf(df)
 ```
 
-## view rf df
+## View rf df
 ```{r}
 View(rf_df)
 ```
 
-
-## XGBoost Functions
+## Main XGBoost Function
 ```{r}
-helper_tuning_boost <- function(train_data, target, features) {
-  n_years<- sort(unique(train_data$caldt))
-  n_feats<- length(features)
-  cutoff  <- n_years[floor(length(n_years) * 0.7)] # first 70% - train, last 30 % - split
-  train <- train_data[train_data$caldt <= cutoff, ]
-  validation <- train_data[train_data$caldt > cutoff, ]
+predict_alpha_boost <- function(df, target = "alpha_ann") {
   
-  dtrain <- xgb.DMatrix(data = as.matrix(train[, features]), label = train[[target]])
-  dval   <- xgb.DMatrix(data = as.matrix(validation[, features]),   label = validation[[target]])
+  features <- setdiff(names(df), c("crsp_fundno", "caldt", "alpha_ann"))
+  pred_year = max(year(df$caldt))
+  train <- df[year(df$caldt) <  pred_year, ] # take all years before pred year to train
+  test  <- df[year(df$caldt) == pred_year, ]
+  
+  # Hyperparameter tuning
+  
+  n_years <- sort(unique(train$caldt))
+  n_feats <- length(features)
+  cutoff  <- n_years[floor(length(n_years) * 0.7)] # first 70% - train, last 30 % - split
+  tune_train <- train[train$caldt <= cutoff, ]
+  tune_validation <- train[train$caldt > cutoff, ]
+  
+  dtrain <- xgb.DMatrix(data = as.matrix(tune_train[, features]), label = tune_train[[target]])
+  dval <- xgb.DMatrix(data = as.matrix(tune_validation[, features]),   label = tune_validation[[target]])
   
   grid <- expand.grid(
-      gamma = c(0.1, 0.2),
-      eta = c(0.05, 0.1),
-      max_depth = c(6, 9)
+      gamma = c(0, 0.1, 0.2),
+      eta = c(0.01, 0.05, 0.1),
+      max_depth = c(3, 6, 9)
   )
   grid$mse <- sapply(seq_len(nrow(grid)), function(i) {
     m <- xgb.train(
       params = list(
         objective = "reg:squarederror",
-        eta   = grid$eta[i],
-        max_depth = grid$max_depth[i],
-        gamma = grid$gamma[i]
+        eta = as.numeric(grid$eta[i]),
+        max_depth = as.integer(grid$max_depth[i]),
+        gamma = as.numeric(grid$gamma[i])
       ),
       data = dtrain,
       nrounds = 100,
       verbose = 0
     )
     preds <- predict(m, dval)
-    mean((validation[[target]] - preds)^2)
+    mean((tune_validation[[target]] - preds)^2)
   })
-  return(grid[which.min(grid$mse), ])
-}
-```
-
-
-## Main XGBoost Function
-```{r}
-predict_alpha_boost <- function(df, target = "alpha_ann", first_pred_year = 2020) {
+  best <- grid[which.min(grid$mse), ]
   
-  features <- setdiff(names(df), c("crsp_fundno", "caldt", "alpha_ann"))
-  results <- list()
+  dtrain <- xgb.DMatrix(data = as.matrix(train[, features]), label = train[[target]])
+  dtest  <- xgb.DMatrix(data = as.matrix(test[, features]))
   
-  for (pred_year in seq(first_pred_year, year(max(df$caldt) ))) {
-    train <- df[year(df$caldt) <  pred_year, ] # take all years before pred year to train
-    test  <- df[year(df$caldt) == pred_year, ]
-    
-    best <- helper_tuning_boost(train, target, features)
-    dtrain <- xgb.DMatrix(data = as.matrix(train[, features]), label = train[[target]])
-    dtest  <- xgb.DMatrix(data = as.matrix(test[, features]))
-    
-    model <- xgb.train(
-      data = dtrain,
-      nrounds = 100,
-      verbose = 0,
-      params = list (
-      gamma = best$gamma,
-      eta = best$eta,
-      max_depth = best$max_depth,
-      objective = "reg:squarederror")
-    )
+  model <- xgb.train(
+    data = dtrain,
+    nrounds = 100,
+    verbose = 0,
+    params = list (
+    gamma = as.numeric(best$gamma),
+    eta = as.numeric(best$eta),
+    max_depth = as.integer(best$max_depth),
+    objective = "reg:squarederror")
+  )
 
-    preds <- predict(model, dtest)
-    mse <- mean((test[[target]] - preds)^2) # mse for all funds in the same year will be equal
-    
-    results[[as.character(pred_year)]] <- data.frame(
-      evaluation_year = pred_year,
-      crsp_fundno = test$crsp_fundno,
-      predicted_alpha  = preds
-    )
-  }
-  return(list(boost_predictions = bind_rows(results)))
+  preds <- predict(model, dtest)
+  
+  results <- data.frame(
+    evaluation_year = pred_year,
+    crsp_fundno = test$crsp_fundno,
+    predicted_alpha  = preds
+  )
+  return(results)
 }
 ```
 
 ## Predict results for xgboost
 ```{r}
-results <- predict_alpha_boost(df)
-boost_df <- results$boost_predictions
+boost_df <- predict_alpha_boost(df)
 ```
-## Final Step: Save Results
+## View Boost results
 ```{r}
 View(boost_df)
 ```
+
+## Sanity check
+```{r}
+print(nrow(rf_df))
+
+duplicates_rf <- rf_df %>%
+  group_by(crsp_fundno, evaluation_year) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  filter(count > 1)
+
+head(duplicates_rf)
+```
+
+```{r}
+print(nrow(boost_df))
+
+duplicates_boost <- boost_df %>%
+  group_by(crsp_fundno, evaluation_year) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  filter(count > 1)
+
+head(duplicates_boost)
+```
+
+
+
