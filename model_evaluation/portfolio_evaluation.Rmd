@@ -1,0 +1,485 @@
+---
+title: "Portfolio Construction and Evaluation"
+output: html_document
+date: "2026-03-15"
+---
+  
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+```   
+
+
+```{r}
+#load library
+library(fredr)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(zoo) 
+library(lubridate)
+library(data.table)
+library(hdm)
+library(glmnet)
+library(forecast)
+library(readxl)
+library(urca)
+library(ggplot2)
+library(corrplot)
+library(randomForest)
+library(lmtest)
+library(sandwich)
+```
+
+THIINGS TO DO BEFORE U CLICK RUN ALL
+1. make sure final_data.csv is in ../data/
+2. Make sure u have qqq_returns.csv in ../data/
+3. replace model code with ur own code (replace dummy_model and the model name after the function when running the expanding window)
+
+```{r}
+#read in data
+file_path = "../data/final_data.csv"
+df = read.csv(file_path) 
+
+# this function helps to construct a df that stores all the top decile crsp_fundno for every year between 2020 to 2025
+# and also a df that stores all the predicted alphas for every fund
+build_top_decile_history <- function(model_fn,
+                                     entire_df,
+                                     date_col = "caldt",
+                                     fund_col = "crsp_fundno",
+                                     test_start_year = 2020,
+                                     test_end_year = 2025) {
+  
+  # ensure date is Date type
+  df <- entire_df %>%
+    mutate(
+      !!date_col := as.Date(.data[[date_col]])
+    ) %>%
+    arrange(.data[[date_col]])
+  
+  # store yearly outputs
+  all_predictions_list <- list()
+  all_top_decile_list <- list()
+  
+  # loop over each out-of-sample test year
+  for (yr in test_start_year:test_end_year) {
+    
+    # Expanding window:
+    # forecast for most recent year
+    train_cutoff <- as.Date(paste0(yr, "-12-31"))
+    
+    train_df <- df %>%
+      filter(.data[[date_col]] <= train_cutoff)
+    
+    if (nrow(train_df) == 0) {
+      warning(paste0("No training data available for test year ", yr, ". Skipping."))
+      next
+    }
+    
+    # call model. Model output a df that contains evaluation_year, crsp_fundno, predicted_alpha for every single fund
+    model_output <- model_fn(train_df)
+    
+    model_output <- model_output %>%
+      select(
+        evaluation_year,
+        !!fund_col,
+        predicted_alpha
+      ) %>%
+      distinct()
+    
+    all_predictions_list[[as.character(yr)]] <- model_output
+    
+    
+    # keep only top 10% within each evaluation year x rebalance date
+    top_decile_output <- model_output %>%
+      group_by(evaluation_year) %>%
+      arrange(desc(predicted_alpha), .by_group = TRUE) %>%
+      mutate(
+        rank = row_number(),
+        n_funds = n(),
+        cutoff = ceiling(0.10 * n_funds)
+      ) %>%
+      filter(rank <= cutoff) %>%
+      ungroup() %>%
+      select(evaluation_year, !!fund_col, predicted_alpha)
+    
+    all_top_decile_list[[as.character(yr)]] <- top_decile_output
+  }
+  
+  # combine across years
+  all_predictions <- bind_rows(all_predictions_list) %>%
+    arrange(evaluation_year, desc(predicted_alpha))
+  
+  top_decile_history <- bind_rows(all_top_decile_list) %>%
+    arrange(evaluation_year,  desc(predicted_alpha))
+  
+  # return both
+  return(list(
+    all_predictions = all_predictions,
+    top_decile_history = top_decile_history
+  ))
+}
+```
+
+REPLACE UR MODEL HERE AND MODEL NAME WHEN CALLING THE FUNCTION
+```{r}
+#example model here
+predict_alpha_rf <- function(df, target = "alpha_ann") {
+  
+  features <- setdiff(names(df), c("crsp_fundno", "caldt", "alpha_ann"))
+  n_feats   <- length(features)
+  pred_year <- max(year(df$caldt))
+  
+  train <- df[year(df$caldt) <  pred_year, ] # take all years before pred year to train
+  test  <- df[year(df$caldt) == pred_year, ]
+  
+  # Hyperparameter Tuning
+  
+  n_years <- sort(unique(year(train$caldt)))
+  cutoff  <- n_years[floor(length(n_years) * 0.7)]
+  tune_train <- train[year(train$caldt) <= cutoff, ]
+  tune_val   <- train[year(train$caldt) >  cutoff, ]
+
+  grid <- expand.grid(
+    ntree    = c(200, 500),
+    mtry     = c(floor(sqrt(n_feats)), floor(n_feats/3)),
+    nodesize = c(5, 10)
+  )
+
+  grid$mse <- sapply(seq_len(nrow(grid)), function(i) {
+    m <- randomForest(
+      x        = tune_train[, features],
+      y        = tune_train[[target]],
+      ntree    = grid$ntree[i],
+      mtry     = grid$mtry[i],
+      nodesize = grid$nodesize[i]
+    )
+    preds <- predict(m, newdata = tune_val[, features])
+    mean((tune_val[[target]] - preds)^2)
+  })
+
+  best <- grid[which.min(grid$mse), ]
+  
+  model <- randomForest(
+    x = train[, features],
+    y = train[[target]],
+    ntree = best$ntree,
+    mtry = best$mtry,
+    nodesize = best$nodesize
+  )
+  
+  preds <- predict(model, newdata = test[, features])
+  mse <- mean((test[[target]] - preds)^2) # mse for all funds in the same year will be equal
+  
+  results <- data.frame(
+    evaluation_year = pred_year,
+    crsp_fundno = test$crsp_fundno,
+    predicted_alpha  = preds
+  )
+
+  return(results)
+}
+
+
+# call the function
+results <- build_top_decile_history(
+  model_fn = predict_alpha_rf,           #==================CHANGE MODEL NAME HERE ==========================
+  entire_df = df
+)
+
+# all_predictions can be used to do dm test, rmse etc
+all_predictions <- results$all_predictions
+# save these predictions in csv for RMSE, DM test 
+df_for_dm_test <- df %>%
+  mutate(
+    caldt = as.Date(caldt),
+    evaluation_year = year(caldt)
+  ) %>%
+  inner_join(
+    all_predictions,
+    by = c("evaluation_year", "crsp_fundno")
+  ) %>%
+  transmute(
+    caldt = caldt,
+    fundno = crsp_fundno,
+    actual_alpha = alpha_ann,
+    predicted_alpha = predicted_alpha
+  ) %>%
+  arrange(caldt, fundno)
+write.csv(df_for_dm_test, "df_for_dm_test.csv", row.names = FALSE)
+
+# this df is used to construct the portfolio
+top_decile_history <- results$top_decile_history
+```
+
+Constructing portfolio of mutual funds
+```{r}
+# map the top decile funds to their monthly returns
+
+df_monthly_returns = read.csv("../data/tech_monthly_returns.csv")
+
+# filter to just 2019 to 2024
+df_monthly_returns = df_monthly_returns %>% mutate(caldt = dmy(caldt)) %>% filter(year(caldt) >= 2020, year(caldt) <= 2025)
+
+# map monthly returns back to the top decile funds
+top_decile_with_returns <- top_decile_history %>%
+  left_join(
+    df_monthly_returns %>%
+      mutate(evaluation_year = year(caldt)),
+    by = c("evaluation_year", "crsp_fundno") 
+  ) %>% 
+  mutate(across(-c(crsp_fundno, caldt), as.numeric))
+
+# construct equally weighted portfolio, and if for any month, any funds go missing, rebalance the money to other funds equally.
+
+construct_long_only_fund_portfolio <- function(df,
+                                               start_year = 2020,
+                                               end_year = 2025,
+                                               initial_equity = 1,
+                                               buy_fee = 0.01,
+                                               sell_fee = 0.01) {
+  # Required columns
+  required_cols <- c("evaluation_year", "crsp_fundno", "caldt", "mret")
+  missing_cols <- setdiff(required_cols, names(df))
+  if (length(missing_cols) > 0) {
+    stop(paste("Missing required columns:", paste(missing_cols, collapse = ", ")))
+  }
+  
+  # Clean and prepare
+  df_clean <- df %>%
+    mutate(
+      caldt = caldt,
+      evaluation_year = as.integer(evaluation_year),
+      crsp_fundno = as.character(crsp_fundno),
+      mret = as.numeric(mret),
+      month_num = month(caldt),
+      year_num = year(caldt)
+    ) %>%
+    arrange(evaluation_year, crsp_fundno, caldt)
+  
+  # If year range not specified, use full range in data
+  if (is.null(start_year)) start_year <- min(df_clean$evaluation_year, na.rm = TRUE)
+  if (is.null(end_year)) end_year <- max(df_clean$evaluation_year, na.rm = TRUE)
+  
+  years_to_run <- seq(start_year, end_year)
+  
+  portfolio_results <- list()
+  equity_start_of_year <- initial_equity
+  
+  for (yr in years_to_run) {
+    year_df <- df_clean %>%
+      filter(evaluation_year == yr) %>%
+      arrange(caldt, crsp_fundno)
+    
+    if (nrow(year_df) == 0) next
+    
+    # January universe = funds present in January of that evaluation year
+    jan_df <- year_df %>% filter(month_num == 1)
+    
+    jan_funds <- unique(jan_df$crsp_fundno)
+    N <- length(jan_funds)
+    
+    if (N == 0) {
+      warning(paste("No January funds found for year", yr, "- skipping year"))
+      next
+    }
+    
+    # Use only funds that are actually in January
+    year_df <- year_df %>%
+      filter(crsp_fundno %in% jan_funds)
+    
+    # Monthly grid for that year
+    months_in_year <- sort(unique(year_df$caldt))
+    months_in_year <- months_in_year[year(months_in_year) == yr]
+    
+    # Start-of-year equal allocation after January buy fee
+    invested_equity_after_buy_fee <- equity_start_of_year * (1 - buy_fee)
+    initial_position_value <- invested_equity_after_buy_fee / N
+    
+    # Track per-fund state
+    positions <- tibble(
+      crsp_fundno = jan_funds,
+      value = initial_position_value,
+      alive = TRUE,
+      in_cash = FALSE
+    )
+    
+    year_results <- list()
+    prev_total_equity <- equity_start_of_year
+    
+    for (dt in months_in_year) {
+      month_data <- year_df %>%
+        filter(caldt == dt) %>%
+        select(crsp_fundno, mret)
+      
+      current_funds <- month_data$crsp_fundno
+      
+      # Funds that disappeared this month:
+      # liquidate them immediately, pay sell fee, then hold as cash
+      disappeared_funds <- positions$crsp_fundno[positions$alive & !(positions$crsp_fundno %in% current_funds)]
+      
+      if (length(disappeared_funds) > 0) {
+        positions <- positions %>%
+          mutate(
+            value = ifelse(
+              crsp_fundno %in% disappeared_funds & alive,
+              value * (1 - sell_fee),
+              value
+            ),
+            alive = ifelse(crsp_fundno %in% disappeared_funds, FALSE, alive),
+            in_cash = ifelse(crsp_fundno %in% disappeared_funds, TRUE, in_cash)
+          )
+      }
+      
+      # Apply returns only to funds observed this month and still alive
+      positions <- positions %>%
+        left_join(month_data, by = "crsp_fundno") %>%
+        mutate(
+          value = case_when(
+            alive & !is.na(mret) ~ value * (1 + mret),
+            TRUE ~ value
+          )
+        ) %>%
+        select(crsp_fundno, value, alive, in_cash)
+      
+      total_equity_before_sell_fee <- sum(positions$value, na.rm = TRUE)
+      
+      # December sell fee on surviving invested positions only
+      total_equity_after_sell_fee <- total_equity_before_sell_fee
+      if (month(dt) == 12) {
+        invested_mask <- positions$alive
+        invested_value_dec <- sum(positions$value[invested_mask], na.rm = TRUE)
+        
+        if (invested_value_dec > 0) {
+          fee_amount <- invested_value_dec * sell_fee
+          
+          positions <- positions %>%
+            mutate(
+              value = ifelse(alive, value * (1 - sell_fee), value)
+            )
+          
+          total_equity_after_sell_fee <- sum(positions$value, na.rm = TRUE)
+        }
+      }
+      
+      monthly_return <- (total_equity_after_sell_fee / prev_total_equity) - 1
+      
+      year_results[[length(year_results) + 1]] <- tibble(
+        caldt = as.Date(dt),
+        evaluation_year = yr,
+        portfolio_equity = total_equity_after_sell_fee,
+        portfolio_return = monthly_return
+      )
+      
+      prev_total_equity <- total_equity_after_sell_fee
+    }
+    
+    year_results_df <- bind_rows(year_results)
+    portfolio_results[[as.character(yr)]] <- year_results_df
+    
+    # Carry final December equity into next January
+    equity_start_of_year <- tail(year_results_df$portfolio_equity, 1)
+  }
+  
+  final_df <- bind_rows(portfolio_results) %>%
+    arrange(caldt)
+  
+  return(final_df)
+}
+
+
+portfolio_monthly_ret <- construct_long_only_fund_portfolio(
+  df = top_decile_with_returns,
+  start_year = 2020,
+  end_year = 2025,
+  initial_equity = 1,
+  buy_fee = 0.01,
+  sell_fee = 0.01
+)
+
+# use nasdaq etf as benchmark for returns
+df_qqq = read.csv("../data/qqq_returns.csv") 
+df_qqq_daily <- df_qqq %>%
+  mutate(
+    Date = mdy(Date),
+    Price = as.numeric(Price)
+  ) %>%
+  arrange(Date)
+
+# identify the first portfolio month
+first_portfolio_date <- as.Date("2020-01-02")
+
+
+# get the first trading day in that month = actual buy-in date
+buy_price <- df_qqq_daily %>%
+  filter(Date == first_portfolio_date) %>%
+  slice(1) %>%
+  pull(Price)
+
+df_qqq_month_end <- df_qqq_daily %>%
+  mutate(month = floor_date(Date, unit = "month")) %>%
+  group_by(month) %>%
+  slice_tail(n = 1) %>%
+  ungroup() %>%
+  transmute(
+    caldt = Date,
+    qqq_price = Price
+  )
+
+# compute equity for holdind qqq
+df_qqq_equity <- df_qqq_month_end %>%
+  mutate(
+    qqq_equity = qqq_price / buy_price
+  ) %>%
+  select(caldt, qqq_equity)
+
+```
+
+
+```{r}
+# read in ff5 + mom 
+df_ff_mom = read.csv("../data/ff5_mom.csv") 
+df_ff_mom = df_ff_mom %>%   mutate(
+  dateff = dmy(dateff),       
+) %>% mutate( caldt = dateff) %>%
+  select(-dateff) %>% filter(year(caldt) >= 2020, year(caldt) <= 2025) 
+
+
+# df that stores portfolio equity, qqq equity and factors (calculate metrics like sharpe ratio)
+df_returns_factors = portfolio_monthly_ret %>% left_join(df_ff_mom, by = "caldt") %>% 
+  mutate(rexcess = portfolio_return - rf) %>% left_join(df_qqq_equity, by = "caldt") %>% mutate(
+    qqq_return = qqq_equity / lag(qqq_equity) - 1,
+    qqq_rexcess = qqq_return - rf
+  )
+
+# plot both equity curves
+ggplot(df_returns_factors, aes(x = caldt)) +
+  geom_line(aes(y = portfolio_equity, color = "Portfolio"), linewidth = 1) +
+  geom_line(aes(y = qqq_equity, color = "QQQ Buy-and-Hold"), linewidth = 1) +
+  labs(
+    title = "Equity Curve: Portfolio vs QQQ Buy-and-Hold",
+    x = "Date",
+    y = "Equity",
+    color = ""
+  ) +
+  theme_minimal()
+
+fit_ff5_mom <- lm(
+  rexcess ~ mktrf + smb + hml + rmw + cma + umd,
+  data = df_returns_factors
+)
+
+summary(fit_ff5_mom)
+
+# newey west se
+nw_ff5_mom <- NeweyWest(fit_ff5_mom, lag = 12, prewhite = FALSE, adjust = TRUE)
+
+coeftest(fit_ff5_mom, vcov. = nw_ff5_mom)
+```
+
+
+
+
