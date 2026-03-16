@@ -24,8 +24,11 @@ df <- read_csv('data/final_data.csv')
 ```{r}
 
 predict_alpha_rnn <- function(df, target = "alpha_ann") {
-  library(keras3)
-  library(caret)
+  
+  set.seed(4101)
+  if (requireNamespace("tensorflow", quietly = TRUE)) {
+    tensorflow::set_random_seed(4101, disable_gpu = FALSE) 
+  }
   
   features <- setdiff(names(df), c("crsp_fundno", "caldt", "alpha_ann"))
   n_feats  <- length(features)
@@ -55,7 +58,7 @@ predict_alpha_rnn <- function(df, target = "alpha_ann") {
   grid <- expand.grid(
     units = c(32, 64),
     dropout = c(0, 0.2),
-    lr = c(0.01, 0.001)
+    lr = c(0.001, 0.005)
   )
   
   grid$mse <- sapply(1:nrow(grid), function(i) {
