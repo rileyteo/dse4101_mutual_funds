@@ -222,16 +222,12 @@ predict_alpha_rnn <- function(df){
 
   rnn_df <- bind_rows(results_rnn)
 
-  return(list(
-    rnn_predictions = rnn_df
-  ))
+  return(rnn_df)
 }
 ```
 
 ```{r}
 
 result <- predict_alpha_rnn(df)
-
-rnn_df <- result$rnn_predictions
 
 ```
