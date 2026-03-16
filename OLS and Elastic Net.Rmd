@@ -14,102 +14,141 @@ knitr::opts_chunk$set(echo = TRUE)
 # load libraries
 library(tidyverse)
 library(glmnet)
-library(caret)
 library(lubridate)
 # load data
 df <- read_csv('data/final_data.csv')
-```
+# preprocessing
+prepare_data <- function(df){
 
-## wrap modeling process in a function
-```{r}
-predict_alpha <- function(df){
-  # preprocessing
   df <- df %>%
     mutate(
       caldt = as.Date(caldt),
-      year = year(caldt)
+      year = lubridate::year(caldt)
     ) %>%
     arrange(year, crsp_fundno) %>%
     drop_na()
 
-  # define features
   feature_names <- df %>%
     select(-alpha_ann, -crsp_fundno, -caldt, -year) %>%
     colnames()
 
-  # storage
+  return(list(
+    df = df,
+    feature_names = feature_names
+  ))
+}
+```
+
+## ols
+```{r}
+predict_alpha_ols <- function(prepared_data){
+
+  df <- prepared_data$df
+  feature_names <- prepared_data$feature_names
+
   results_ols <- list()
-  results_enet <- list()
 
-
-  # initialise training window
   years <- sort(unique(df$year))
   start_year <- min(years)
   initial_train_end <- 2019
+
   if(!(2019 %in% years)){
     stop("Dataset must contain year 2019 for initial training window.")
   }
 
-  # expanding window loop
-
-  for (t in (initial_train_end + 1) : max(years)) {
+  for (t in (initial_train_end + 1):max(years)){
 
     train_full <- df %>%
       filter(year >= start_year & year <= (t - 1))
-    
+
     test_data <- df %>%
       filter(year == t)
 
     if (nrow(test_data) == 0) next
 
-    # hyperparameter tuning: 70/30 ratio; no data leakage
-    tune_years <- sort(unique(train_full$year))
-    
-    split_index <- floor(0.7 * length(tune_years))
-    
-    train_years <- tune_years[1 : split_index]
-    valid_years <- tune_years[(split_index + 1) : length(tune_years)]
-   
-    train_tune <- train_full %>% 
-      filter(year %in% train_years)
-    valid_tune <- train_full %>%
-      filter(year %in% valid_years)
-    
-    X_train <- train_tune %>% 
-      select(all_of(feature_names)) %>%
-      as.matrix()
-    y_train <- train_tune$alpha_ann
-    
-    X_valid <- valid_tune %>%
-      select(all_of(feature_names)) %>%
-      as.matrix()
-    y_valid <- valid_tune$alpha_ann
-    
-    # benchmark: ols
     ols_model <- lm(
       alpha_ann ~ . - crsp_fundno - caldt - year,
       data = train_full
     )
+
     pred_ols <- predict(ols_model, newdata = test_data)
-    
-    # store ols forecast
+
     temp_ols <- test_data %>%
       transmute(
         evaluation_year = year,
         crsp_fundno = crsp_fundno,
         predicted_alpha = as.numeric(pred_ols)
-    )
+      )
 
     results_ols[[as.character(t)]] <- temp_ols
+  }
 
-    
-    # elastic net hyperparameter tuning
-    alphas <- seq(0 , 1,by = 0.1)
+  bind_rows(results_ols)
+}
+```
+
+## enet
+```{r}
+predict_alpha_enet <- function(prepared_data){
+
+  df <- prepared_data$df
+  feature_names <- prepared_data$feature_names
+
+  results_enet <- list()
+
+  years <- sort(unique(df$year))
+  start_year <- min(years)
+  initial_train_end <- 2019
+
+  if(!(2019 %in% years)){
+    stop("Dataset must contain year 2019 for initial training window.")
+  }
+
+  for (t in (initial_train_end + 1):max(years)){
+
+    train_full <- df %>%
+      filter(year >= start_year & year <= (t - 1))
+
+    test_data <- df %>%
+      filter(year == t)
+
+    if (nrow(test_data) == 0) next
+
+    # hyperparameter tuning split
+    tune_years <- sort(unique(train_full$year))
+
+    split_index <- floor(0.7 * length(tune_years))
+
+    train_years <- tune_years[1:split_index]
+    valid_years <- tune_years[(split_index + 1):length(tune_years)]
+
+    train_tune <- train_full %>%
+      filter(year %in% train_years)
+
+    valid_tune <- train_full %>%
+      filter(year %in% valid_years)
+
+    X_train <- train_tune %>%
+      select(all_of(feature_names)) %>%
+      as.matrix()
+
+    y_train <- train_tune$alpha_ann
+
+    X_valid <- valid_tune %>%
+      select(all_of(feature_names)) %>%
+      as.matrix()
+
+    y_valid <- valid_tune$alpha_ann
+
+    # hyperparameter search
+    alphas <- seq(0, 1, by = 0.1)
+
     best_mse <- Inf
     best_alpha <- NULL
     best_lambda <- NULL
 
     for (a in alphas){
+
       model <- glmnet(
         X_train,
         y_train,
@@ -122,6 +161,7 @@ predict_alpha <- function(df){
 
         preds <- predict(model, newx = X_valid, s = l)
         mse <- mean((y_valid - preds)^2)
+
         if (mse < best_mse){
           best_mse <- mse
           best_alpha <- a
@@ -130,13 +170,13 @@ predict_alpha <- function(df){
       }
     }
 
-    # refit tuned elastic net on full window
+    # refit model
     X_full <- train_full %>%
       select(all_of(feature_names)) %>%
       as.matrix()
-    
+
     y_full <- train_full$alpha_ann
-    
+
     enet_model <- glmnet(
       X_full,
       y_full,
@@ -149,9 +189,7 @@ predict_alpha <- function(df){
       as.matrix()
 
     pred_enet <- predict(enet_model, newx = X_test)
-    
-    # store predictions
-    
+
     temp_enet <- test_data %>%
       transmute(
         evaluation_year = year,
@@ -160,32 +198,23 @@ predict_alpha <- function(df){
       )
 
     results_enet[[as.character(t)]] <- temp_enet
-
-
   }
 
-  # combine predictions
-  ols_df <- bind_rows(results_ols)
-  enet_df <- bind_rows(results_enet)
-  return(list(
-    ols_predictions = ols_df,
-    enet_predictions = enet_df
-    )
-  )
+  bind_rows(results_enet)
 }
 ```
 
 ## produce forecast
 ```{r}
-result <- predict_alpha(df)
-ols_df  <- result$ols_predictions
-enet_df <- result$enet_predictions
+prepared <- prepare_data(df)
+ols_predictions  <- predict_alpha_ols(prepared)
+enet_predictions <- predict_alpha_enet(prepared)
 ```
 
 ## view results
 ```{r}
-View(ols_df)
-View(enet_df)
+View(ols_predictions)
+View(enet_predictions)
 ```
 
 
