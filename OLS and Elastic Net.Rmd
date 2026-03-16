@@ -6,217 +6,328 @@ output: html_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+```   
+
+
+```{r}
+#load library
+library(fredr)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(zoo) 
+library(lubridate)
+library(data.table)
+library(hdm)
+library(glmnet)
+library(forecast)
+library(readxl)
+library(urca)
+library(ggplot2)
+library(corrplot)
+library(randomForest)
+library(lmtest)
+library(sandwich)
 ```
 
-## Preparation
-```{r, echo = False}
-# load libraries
-library(tidyverse)
-library(glmnet)
-library(lubridate)
-# load data
-df <- read_csv('data/final_data.csv')
-# preprocessing
-prepare_data <- function(df){
+THIINGS TO DO BEFORE U CLICK RUN ALL
+1. make sure final_data.csv is in ../data/
+2. Make sure u have qqq_returns.csv in ../data/
+3. replace model code with ur own code (replace dummy_model and the model name after the function when running the expanding window)
 
-  df <- df %>%
+```{r}
+#read in data
+file_path = "../data/final_data.csv"
+df = read.csv(file_path) 
+
+# this function helps to construct a df that stores all the top decile crsp_fundno for every year between 2020 to 2025
+# and also a df that stores all the predicted alphas for every fund
+build_top_decile_history <- function(model_fn,
+                                     entire_df,
+                                     date_col = "caldt",
+                                     fund_col = "crsp_fundno",
+                                     test_start_year = 2020,
+                                     test_end_year = 2025) {
+  
+  # ensure date is Date type
+  df <- entire_df %>%
     mutate(
-      caldt = as.Date(caldt),
-      year = lubridate::year(caldt)
+      !!date_col := as.Date(.data[[date_col]])
     ) %>%
-    arrange(year, crsp_fundno) %>%
-    drop_na()
-
-  feature_names <- df %>%
-    select(-alpha_ann, -crsp_fundno, -caldt, -year) %>%
-    colnames()
-
+    arrange(.data[[date_col]])
+  
+  # store yearly outputs
+  all_predictions_list <- list()
+  all_top_decile_list <- list()
+  
+  # loop over each out-of-sample test year
+  for (yr in test_start_year:test_end_year) {
+    
+    # Expanding window:
+    # forecast for most recent year
+    train_cutoff <- as.Date(paste0(yr, "-12-31"))
+    
+    train_df <- df %>%
+      filter(.data[[date_col]] <= train_cutoff)
+    
+    if (nrow(train_df) == 0) {
+      warning(paste0("No training data available for test year ", yr, ". Skipping."))
+      next
+    }
+    
+    # call model. Model output a df that contains evaluation_year, crsp_fundno, predicted_alpha for every single fund
+    model_output <- model_fn(train_df)
+    
+    model_output <- model_output %>%
+      select(
+        evaluation_year,
+        !!fund_col,
+        predicted_alpha
+      ) %>%
+      distinct()
+    
+    all_predictions_list[[as.character(yr)]] <- model_output
+    
+    
+    # keep only top 10% within each evaluation year x rebalance date
+    top_decile_output <- model_output %>%
+      group_by(evaluation_year) %>%
+      arrange(desc(predicted_alpha), .by_group = TRUE) %>%
+      mutate(
+        rank = row_number(),
+        n_funds = n(),
+        cutoff = ceiling(0.10 * n_funds)
+      ) %>%
+      filter(rank <= cutoff) %>%
+      ungroup() %>%
+      select(evaluation_year, !!fund_col, predicted_alpha)
+    
+    all_top_decile_list[[as.character(yr)]] <- top_decile_output
+  }
+  
+  # combine across years
+  all_predictions <- bind_rows(all_predictions_list) %>%
+    arrange(evaluation_year, desc(predicted_alpha))
+  
+  top_decile_history <- bind_rows(all_top_decile_list) %>%
+    arrange(evaluation_year,  desc(predicted_alpha))
+  
+  # return both
   return(list(
-    df = df,
-    feature_names = feature_names
+    all_predictions = all_predictions,
+    top_decile_history = top_decile_history
   ))
 }
 ```
 
-## ols
+## ols function to be copied to replace the code block in eval
 ```{r}
-predict_alpha_ols <- function(prepared_data){
+#example model here
+predict_alpha_ols <- function(train_df){
+  df <- train_df %>%
+    mutate(
+      caldt = as.Date(caldt),
+      year = year(caldt)
+    ) %>%
+    arrange(year, crsp_fundno) %>%
+    drop_na()
 
-  df <- prepared_data$df
-  feature_names <- prepared_data$feature_names
+  evaluation_year <- max(df$year)
 
-  results_ols <- list()
+  train_data <- df %>%
+    filter(year < evaluation_year)
 
-  years <- sort(unique(df$year))
-  start_year <- min(years)
-  initial_train_end <- 2019
+  test_data <- df %>%
+    filter(year == evaluation_year)
 
-  if(!(2019 %in% years)){
-    stop("Dataset must contain year 2019 for initial training window.")
-  }
+  feature_names <- train_data %>%
+    select(-alpha_ann, -crsp_fundno, -caldt, -year) %>%
+    colnames()
 
-  for (t in (initial_train_end + 1):max(years)){
+  formula <- as.formula(
+    paste("alpha_ann ~", paste(feature_names, collapse = " + "))
+  )
 
-    train_full <- df %>%
-      filter(year >= start_year & year <= (t - 1))
+  model <- lm(formula, data = train_data)
 
-    test_data <- df %>%
-      filter(year == t)
+  preds <- predict(model, newdata = test_data)
 
-    if (nrow(test_data) == 0) next
+  result <- tibble(
+    evaluation_year = evaluation_year,
+    crsp_fundno = test_data$crsp_fundno,
+    predicted_alpha = preds
+  )
 
-    ols_model <- lm(
-      alpha_ann ~ . - crsp_fundno - caldt - year,
-      data = train_full
-    )
-
-    pred_ols <- predict(ols_model, newdata = test_data)
-
-    temp_ols <- test_data %>%
-      transmute(
-        evaluation_year = year,
-        crsp_fundno = crsp_fundno,
-        predicted_alpha = as.numeric(pred_ols)
-      )
-
-    results_ols[[as.character(t)]] <- temp_ols
-  }
-
-  bind_rows(results_ols)
+  return(result)
 }
+
+# call the function
+results <- build_top_decile_history(
+  model_fn = predict_alpha_ols,           #==================CHANGE MODEL NAME HERE ==========================
+  entire_df = df
+)
+
+# all_predictions can be used to do dm test, rmse etc
+all_predictions <- results$all_predictions
+# save these predictions in csv for RMSE, DM test 
+df_for_dm_test <- df %>%
+  mutate(
+    caldt = as.Date(caldt),
+    evaluation_year = year(caldt)
+  ) %>%
+  inner_join(
+    all_predictions,
+    by = c("evaluation_year", "crsp_fundno")
+  ) %>%
+  transmute(
+    caldt = caldt,
+    fundno = crsp_fundno,
+    actual_alpha = alpha_ann,
+    predicted_alpha = predicted_alpha
+  ) %>%
+  arrange(caldt, fundno)
 ```
 
-## enet
+## enet function to be copied to replace the code block in eval
 ```{r}
-predict_alpha_enet <- function(prepared_data){
+#enet
+predict_alpha_enet <- function(train_df){
+  df <- train_df %>%
+    mutate(
+      caldt = as.Date(caldt),
+      year = year(caldt)
+    ) %>%
+    arrange(year, crsp_fundno) %>%
+    drop_na()
 
-  df <- prepared_data$df
-  feature_names <- prepared_data$feature_names
+  evaluation_year <- max(df$year)
 
-  results_enet <- list()
+  train_full <- df %>%
+    filter(year < evaluation_year)
 
-  years <- sort(unique(df$year))
-  start_year <- min(years)
-  initial_train_end <- 2019
+  test_data <- df %>%
+    filter(year == evaluation_year)
 
-  if(!(2019 %in% years)){
-    stop("Dataset must contain year 2019 for initial training window.")
-  }
+  if(nrow(test_data) == 0) return(NULL)
 
-  for (t in (initial_train_end + 1):max(years)){
+  feature_names <- train_full %>%
+    select(-alpha_ann, -crsp_fundno, -caldt, -year) %>%
+    colnames()
 
-    train_full <- df %>%
-      filter(year >= start_year & year <= (t - 1))
+  tune_years <- sort(unique(train_full$year))
 
-    test_data <- df %>%
-      filter(year == t)
+  split_index <- floor(0.7 * length(tune_years))
 
-    if (nrow(test_data) == 0) next
+  train_years <- tune_years[1:split_index]
+  valid_years <- tune_years[(split_index + 1):length(tune_years)]
 
-    # hyperparameter tuning split
-    tune_years <- sort(unique(train_full$year))
+  train_tune <- train_full %>%
+    filter(year %in% train_years)
 
-    split_index <- floor(0.7 * length(tune_years))
+  valid_tune <- train_full %>%
+    filter(year %in% valid_years)
 
-    train_years <- tune_years[1:split_index]
-    valid_years <- tune_years[(split_index + 1):length(tune_years)]
+  X_train <- train_tune %>%
+    select(all_of(feature_names)) %>%
+    as.matrix()
 
-    train_tune <- train_full %>%
-      filter(year %in% train_years)
+  y_train <- train_tune$alpha_ann
 
-    valid_tune <- train_full %>%
-      filter(year %in% valid_years)
+  X_valid <- valid_tune %>%
+    select(all_of(feature_names)) %>%
+    as.matrix()
 
-    X_train <- train_tune %>%
-      select(all_of(feature_names)) %>%
-      as.matrix()
+  y_valid <- valid_tune$alpha_ann
 
-    y_train <- train_tune$alpha_ann
+  alphas <- seq(0, 1, by = 0.1)
 
-    X_valid <- valid_tune %>%
-      select(all_of(feature_names)) %>%
-      as.matrix()
+  best_mse <- Inf
+  best_alpha <- NULL
+  best_lambda <- NULL
 
-    y_valid <- valid_tune$alpha_ann
+  for (a in alphas){
 
-    # hyperparameter search
-    alphas <- seq(0, 1, by = 0.1)
+    model <- glmnet(
+      X_train,
+      y_train,
+      alpha = a
+    )
 
-    best_mse <- Inf
-    best_alpha <- NULL
-    best_lambda <- NULL
+    lambdas <- model$lambda
 
-    for (a in alphas){
+    for (l in lambdas){
 
-      model <- glmnet(
-        X_train,
-        y_train,
-        alpha = a
-      )
+      preds <- predict(model, newx = X_valid, s = l)
+      mse <- mean((y_valid - preds)^2)
 
-      lambdas <- model$lambda
-
-      for (l in lambdas){
-
-        preds <- predict(model, newx = X_valid, s = l)
-        mse <- mean((y_valid - preds)^2)
-
-        if (mse < best_mse){
-          best_mse <- mse
-          best_alpha <- a
-          best_lambda <- l
-        }
+      if (mse < best_mse){
+        best_mse <- mse
+        best_alpha <- a
+        best_lambda <- l
       }
     }
-
-    # refit model
-    X_full <- train_full %>%
-      select(all_of(feature_names)) %>%
-      as.matrix()
-
-    y_full <- train_full$alpha_ann
-
-    enet_model <- glmnet(
-      X_full,
-      y_full,
-      alpha = best_alpha,
-      lambda = best_lambda
-    )
-
-    X_test <- test_data %>%
-      select(all_of(feature_names)) %>%
-      as.matrix()
-
-    pred_enet <- predict(enet_model, newx = X_test)
-
-    temp_enet <- test_data %>%
-      transmute(
-        evaluation_year = year,
-        crsp_fundno = crsp_fundno,
-        predicted_alpha = as.numeric(pred_enet)
-      )
-
-    results_enet[[as.character(t)]] <- temp_enet
   }
 
-  bind_rows(results_enet)
+  X_full <- train_full %>%
+    select(all_of(feature_names)) %>%
+    as.matrix()
+
+  y_full <- train_full$alpha_ann
+
+  enet_model <- glmnet(
+    X_full,
+    y_full,
+    alpha = best_alpha,
+    lambda = best_lambda
+  )
+
+  X_test <- test_data %>%
+    select(all_of(feature_names)) %>%
+    as.matrix()
+
+  pred_enet <- predict(enet_model, newx = X_test)
+
+  result <- test_data %>%
+    transmute(
+      evaluation_year = year,
+      crsp_fundno = crsp_fundno,
+      predicted_alpha = as.numeric(pred_enet)
+    )
+
+  return(result)
 }
-```
 
-## produce forecast
-```{r}
-prepared <- prepare_data(df)
-ols_predictions  <- predict_alpha_ols(prepared)
-enet_predictions <- predict_alpha_enet(prepared)
-```
+# call the function
+results <- build_top_decile_history(
+  model_fn = predict_alpha_enet,           #==================CHANGE MODEL NAME HERE ==========================
+  entire_df = df
+)
 
-## view results
-```{r}
-View(ols_predictions)
-View(enet_predictions)
+# all_predictions can be used to do dm test, rmse etc
+all_predictions <- results$all_predictions
+# save these predictions in csv for RMSE, DM test 
+df_for_dm_test <- df %>%
+  mutate(
+    caldt = as.Date(caldt),
+    evaluation_year = year(caldt)
+  ) %>%
+  inner_join(
+    all_predictions,
+    by = c("evaluation_year", "crsp_fundno")
+  ) %>%
+  transmute(
+    caldt = caldt,
+    fundno = crsp_fundno,
+    actual_alpha = alpha_ann,
+    predicted_alpha = predicted_alpha
+  ) %>%
+  arrange(caldt, fundno)
 ```
-
 
 
 
