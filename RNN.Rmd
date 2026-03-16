@@ -23,206 +23,91 @@ df <- read_csv('data/final_data.csv')
 
 ```{r}
 
-predict_alpha_rnn <- function(df){
-
-  df <- df %>%
-    mutate(
-      caldt = as.Date(caldt),
-      year = year(caldt)
-    ) %>%
-    arrange(year, crsp_fundno) %>%
-    drop_na()
-
-  feature_names <- df %>%
-    select(-alpha_ann, -crsp_fundno, -caldt, -year) %>%
-    colnames()
-
-  results_rnn <- list()
-
-  years <- sort(unique(df$year))
-  start_year <- min(years)
-  initial_train_end <- 2019
-
-  if(!(2019 %in% years)){
-    stop("Dataset must contain year 2019 for initial training window.")
+predict_alpha_rnn <- function(df, target = "alpha_ann") {
+  library(keras3)
+  library(caret)
+  
+  features <- setdiff(names(df), c("crsp_fundno", "caldt", "alpha_ann"))
+  n_feats  <- length(features)
+  pred_year <- max(year(df$caldt))
+  
+  # Data Splitting
+  train_full <- df[year(df$caldt) <  pred_year, ]
+  test       <- df[year(df$caldt) == pred_year, ]
+  
+  n_years    <- sort(unique(year(train_full$caldt)))
+  cutoff     <- n_years[floor(length(n_years) * 0.7)]
+  tune_train <- train_full[year(train_full$caldt) <= cutoff, ]
+  tune_val   <- train_full[year(train_full$caldt) >  cutoff, ]
+  
+  scaler   <- preProcess(as.matrix(tune_train[, features]), method = c("center", "scale"))
+  prep_rnn <- function(data) {
+    m <- predict(scaler, as.matrix(data[, features]))
+    array(m, dim = c(nrow(m), 1, n_feats))
   }
+  
+  X_train <- prep_rnn(tune_train)
+  y_train <- tune_train[[target]]
+  X_val   <- prep_rnn(tune_val)
+  y_val   <- tune_val[[target]]
 
-  for (t in (initial_train_end + 1):max(years)) {
-
-    train_full <- df %>%
-      filter(year >= start_year & year <= (t - 1))
-
-    test_data <- df %>%
-      filter(year == t)
-
-    if (nrow(test_data) == 0) next
-
-    tune_years <- sort(unique(train_full$year))
-    split_index <- floor(0.7 * length(tune_years))
-
-    train_years <- tune_years[1:split_index]
-    valid_years <- tune_years[(split_index + 1):length(tune_years)]
-
-    train_tune <- train_full %>%
-      filter(year %in% train_years)
-
-    valid_tune <- train_full %>%
-      filter(year %in% valid_years)
-
-    X_train <- train_tune %>%
-      select(all_of(feature_names)) %>%
-      as.matrix()
-
-    y_train <- train_tune$alpha_ann
-
-    X_valid <- valid_tune %>%
-      select(all_of(feature_names)) %>%
-      as.matrix()
-
-    y_valid <- valid_tune$alpha_ann
-
-    # scale features
-    scaler <- preProcess(X_train, method = c("center","scale"))
-    X_train <- predict(scaler, X_train)
-    X_valid <- predict(scaler, X_valid)
-
-    n_features <- ncol(X_train)
-
-    # reshape for RNN
-    X_train <- array(X_train, dim = c(nrow(X_train),1,n_features))
-    X_valid <- array(X_valid, dim = c(nrow(X_valid),1,n_features))
-
-    # tuning grids
-    units_grid <- c(16,32,64)
-    dropout_grid <- c(0,0.2)
-    dense_grid <- c(8,16)
-    lr_grid <- c(0.001,0.0005)
-    batch_grid <- c(32,64)
-
-    best_mse <- Inf
-    best_params <- list()
-
-    for(u in units_grid){
-      for(d in dropout_grid){
-        for(dense_u in dense_grid){
-          for(lr in lr_grid){
-            for(batch in batch_grid){
-
-              model <- keras_model_sequential() |>
-                layer_lstm(
-                  units = u,
-                  dropout = d,
-                  recurrent_dropout = d,
-                  input_shape = c(1,n_features)
-                ) |>
-                layer_dense(units = dense_u, activation = "relu") |>
-                layer_dense(units = 1)
-
-              model |> compile(
-                optimizer = optimizer_adam(learning_rate = lr),
-                loss = "mse"
-              )
-
-              history <- model |> fit(
-                X_train,
-                y_train,
-                epochs = 50,
-                batch_size = batch,
-                validation_data = list(X_valid,y_valid),
-                callbacks = list(
-                  callback_early_stopping(
-                    monitor = "val_loss",
-                    patience = 5,
-                    restore_best_weights = TRUE
-                  )
-                ),
-                verbose = 0
-              )
-
-              preds <- model |> predict(X_valid)
-
-              mse <- mean((y_valid - preds)^2)
-
-              if(mse < best_mse){
-                best_mse <- mse
-                best_params <- list(
-                  units = u,
-                  dropout = d,
-                  dense = dense_u,
-                  lr = lr,
-                  batch = batch
-                )
-              }
-            }
-          }
-        }
-      }
-    }
-
-    # refit using best parameters
-    X_full <- train_full %>%
-      select(all_of(feature_names)) %>%
-      as.matrix()
-
-    y_full <- train_full$alpha_ann
-
-    X_full <- predict(scaler, X_full)
-
-    X_full <- array(X_full, dim = c(nrow(X_full),1,n_features))
-
-    final_model <- keras_model_sequential() |>
+  # Hyperparameter grid
+  grid <- expand.grid(
+    units = c(32, 64),
+    dropout = c(0, 0.2),
+    lr = c(0.01, 0.001)
+  )
+  
+  grid$mse <- sapply(1:nrow(grid), function(i) {
+    p <- grid[i, ]
+    
+    model <- keras_model_sequential() |>
       layer_lstm(
-        units = best_params$units,
-        dropout = best_params$dropout,
-        recurrent_dropout = best_params$dropout,
-        input_shape = c(1,n_features)
+        units = p$units, 
+        dropout = p$dropout,        
+        input_shape = c(1, n_feats)
       ) |>
-      layer_dense(units = best_params$dense, activation = "relu") |>
       layer_dense(units = 1)
-
-    final_model |> compile(
-      optimizer = optimizer_adam(learning_rate = best_params$lr),
+    
+    model |> compile(
+      optimizer = optimizer_adam(learning_rate = p$lr),
       loss = "mse"
     )
-
-    final_model |> fit(
-      X_full,
-      y_full,
-      epochs = 50,
-      batch_size = best_params$batch,
-      callbacks = list(
-        callback_early_stopping(
-          monitor = "loss",
-          patience = 5,
-          restore_best_weights = TRUE
-        )
-      ),
-      verbose = 0
+    
+    model |> fit(
+      X_train, y_train, 
+      epochs = 30, 
+      batch_size = 64, 
+      verbose = 0,
+      validation_data = list(X_val, y_val),
+      callbacks = list(callback_early_stopping(patience = 5))
     )
+    
+    val_preds <- model |> predict(X_val, verbose = 0)
+    mean((y_val - val_preds)^2)
+  })
 
-    X_test <- test_data %>%
-      select(all_of(feature_names)) %>%
-      as.matrix()
-
-    X_test <- predict(scaler, X_test)
-
-    X_test <- array(X_test, dim = c(nrow(X_test),1,n_features))
-
-    pred_rnn <- final_model |> predict(X_test)
-
-    temp_rnn <- test_data %>%
-      transmute(
-        evaluation_year = year,
-        crsp_fundno = crsp_fundno,
-        predicted_alpha = as.numeric(pred_rnn)
-      )
-
-    results_rnn[[as.character(t)]] <- temp_rnn
-  }
-
-  rnn_df <- bind_rows(results_rnn)
-
-  return(rnn_df)
+  best <- grid[which.min(grid$mse), ]
+  
+  # Refit for final model
+  X_full <- prep_rnn(train_full)
+  y_full <- train_full[[target]]
+  
+  final_model <- keras_model_sequential() |>
+    layer_lstm(units = best$units, dropout = best$dropout, input_shape = c(1, n_feats)) |>
+    layer_dense(units = 1)
+  
+  final_model |> compile(optimizer = optimizer_adam(learning_rate = best$lr), loss = "mse")
+  final_model |> fit(X_full, y_full, epochs = 20, batch_size = 64, verbose = 0)
+  
+  X_test <- prep_rnn(test)
+  preds  <- final_model |> predict(X_test, verbose = 0)
+  
+  return(data.frame(
+    evaluation_year = pred_year,
+    crsp_fundno = test$crsp_fundno,
+    predicted_alpha = as.numeric(preds)
+  ))
 }
 ```
 
