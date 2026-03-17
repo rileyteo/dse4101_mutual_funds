@@ -1,0 +1,138 @@
+---
+title: "lasso_model"
+author: "Kellianne Ng"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load library
+```{r}
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(hdm)
+```
+
+## Load dataset
+```{r}
+df = read.csv("../data/final_data.csv")
+df = df %>% mutate(caldt = ymd(caldt))
+```
+
+```{r}
+fit_lasso_model <- function(full_df,
+                            target_col = "alpha_ann",
+                            fund_col = "crsp_fundno",
+                            date_col = "caldt",
+                            year_col = "evaluation_year") {
+  
+  # 1. Basic checks
+  required_cols <- c(target_col, fund_col, date_col)
+  missing_cols <- setdiff(required_cols, names(full_df))
+  
+  if (length(missing_cols) > 0) {
+    stop(paste("Missing required columns:", paste(missing_cols, collapse = ", ")))
+  }
+  
+  # 2. create evaluation_year
+  df <- full_df %>%
+    mutate(
+      !!date_col := ymd(.data[[date_col]]),
+      !!year_col := as.integer(format(.data[[date_col]], "%Y"))
+    )
+  
+  pred_year = max(df[[year_col]], na.rm = TRUE)
+  
+  # 3. Create squared terms
+  exclude_from_square <- c("crsp_fundno", "caldt", "alpha_ann", "evaluation_year")
+  
+  cols_to_square <- setdiff(names(df), exclude_from_square)
+  cols_to_square <- cols_to_square[sapply(df[cols_to_square], is.numeric)]
+  
+  if (length(cols_to_square) > 0) {
+    for (col in cols_to_square) {
+      df[[paste0(col, "_sq")]] <- df[[col]]^2
+    }
+  }
+  
+  # 4. Split into training and prediction sets
+  train_df <- df %>%
+    filter(.data[[year_col]] < pred_year) %>%
+    filter(!is.na(.data[[target_col]])) %>%
+    arrange(.data[[date_col]])
+  
+  test_df <- df %>%
+    filter(.data[[year_col]] == pred_year) %>%
+    arrange(.data[[date_col]])
+  
+  if (nrow(train_df) == 0) {
+    stop("Training data is empty after filtering.")
+  }
+  
+  if (nrow(test_df) == 0) {
+    stop("Prediction year data is empty.")
+  }
+  
+  # 5. Select predictor columns
+  exclude_from_model <- c(target_col, fund_col, date_col, year_col)
+  
+  predictor_cols <- setdiff(names(train_df), exclude_from_model)
+  predictor_cols <- predictor_cols[sapply(train_df[predictor_cols], is.numeric)]
+  
+  if (length(predictor_cols) == 0) {
+    stop("No numeric predictor columns found.")
+  }
+  
+  # 6. Build training and test matrices
+  x_train <- train_df %>%
+    select(all_of(predictor_cols)) %>%
+    mutate(across(everything(), as.numeric))
+  
+  x_test <- test_df %>%
+    select(all_of(predictor_cols)) %>%
+    mutate(across(everything(), as.numeric))
+  
+  y_train <- train_df[[target_col]]
+  
+  # 7. Fill missing values using training medians
+  train_medians <- sapply(x_train, function(x) median(x, na.rm = TRUE))
+  
+  for (j in seq_along(x_train)) {
+    x_train[[j]][is.na(x_train[[j]])] <- train_medians[j]
+    x_test[[j]][is.na(x_test[[j]])] <- train_medians[j]
+  }
+  
+  # 8. Drop zero-variance columns based on training data
+  keep_cols <- sapply(x_train, function(x) sd(x, na.rm = TRUE) > 0)
+  
+  x_train <- x_train[, keep_cols, drop = FALSE]
+  x_test <- x_test[, keep_cols, drop = FALSE]
+  
+  # 9. Fit plug-in Lasso
+  lasso_fit <- rlasso(
+    x = as.matrix(x_train),
+    y = y_train,
+    post = FALSE
+  )
+  
+  # 10. Predict for all funds in prediction_year
+  predicted_alpha <- as.numeric(
+    predict(lasso_fit, newdata = as.matrix(x_test))
+  )
+  
+  # 11. Return required output
+  pred_df <- test_df %>%
+    transmute(
+      evaluation_year = .data[[year_col]],
+      crsp_fundno = .data[[fund_col]],
+      predicted_alpha = predicted_alpha
+    ) %>%
+    arrange(desc(predicted_alpha))
+  
+  return(pred_df)
+}
+```
