@@ -8,9 +8,13 @@ output: html_document
 ```{r setup, include=FALSE}
 library(dplyr)
 library(tidyr)
+library(ggplot2)
 library(lubridate)
 library(xgboost)
 library(randomForest)
+library(fastshap)
+library(shapviz)
+library(SHAPforxgboost)
 ```
 
 ## Load dataset
@@ -186,27 +190,50 @@ View(boost_df)
 ```
 
 # Feature Importance - Random Forest
+
+How does it work?
+
+* predict_alpha functions were amended to print out the best parameters after every iteration & their respective MSE so that we can compare the relative performance of parameters 
+1. Obtain the model's best performing parameters (iteration with lowest MSE) from the main portfolio
+2. Train the model with those parameters to retrieve the shap values
+3. Compute SHAP values for subset of samples in training data (reduce run time)
+4. Create & print plots based on derived SHAP values
+
+Plots covered:
+1. SHAP ranking bar plot
+2. Dependence plots
+3. Beeswarm plot (only RF)
+4. Feature Importance (only RF) 
+
 ```{r}
 RF_feat_importance <- function(df, target = "alpha_ann", sample_size = 1500) {
   
   features <- setdiff(names(df), c("crsp_fundno", "caldt", "alpha_ann"))
   n_feats   <- length(features)
   pred_year <- max(year(as.Date(df$caldt)))
-  
   train_data <- df %>% filter(year(as.Date(caldt)) < pred_year)
   
   RF_FI_model <- randomForest(
     x = train_data[, features],
     y = train_data[[target]],
-    ntree = 200,            # SUBSTITUTE BEST PARAMS (LOWEST MSE) OF MODEL 
+    ntree = 500,            # SUBSTITUTE BEST PARAMS (LOWEST MSE) OF MODEL 
     mtry = floor(n_feats/3),# TO ENSURE EVALUATION IS CONDUCTED ON A MODEL 
-    nodesize = 5,           # SIMILAR TO THE FINAL ONE BY PREDICT_ALPHA_...FUNCTION
+    nodesize = 10,           # SIMILAR TO THE FINAL ONE BY PREDICT_ALPHA_...FUNCTION
     importance = TRUE
   )
   
+  # compute evaluation metrics -> verify quality of model on OOS data
+  test_data <- df %>% filter(year(as.Date(caldt)) == pred_year)
+  y_pred <- predict(RF_FI_model, newdata = test_data[, features]) 
+  mse <- mean((test_data[[target]] - y_pred)^2)
+  cat("MSE :", round(mse, 5), "\n")
+  cat("RMSE:", round(sqrt(mse), 5), "\n")
+  
   # 1 - RF in built feature importance
+  png("../figures/rf_builtin_importance.png", width = 8, height = 6, units = "in", res = 150)
   imp <- importance(RF_FI_model) # % IncMSE permutation test determines which feature is indispensable
   varImpPlot(RF_FI_model, main = "RF Feature Importance") # IncNodePurity - RSS: Relative contribute to improvements in purity
+  dev.off()
   
   # sample the data because SHAP on a full RF can be very slow
   X_sample <- train_data[sample(nrow(train_data), min(nrow(train_data), sample_size)), features]
@@ -216,8 +243,11 @@ RF_feat_importance <- function(df, target = "alpha_ann", sample_size = 1500) {
   sv <- shapviz(shap_results, X = X_sample)
   
   # 2 - Beeswarm Plot
-  print(sv_importance(sv, kind = "beeswarm") + labs(title = "SHAP Summary"))
+  beeswarm_plot <- sv_importance(sv, kind = "beeswarm") + labs(title = "Random Forest SHAP Summary")
+  ggsave("../figures/rf_shap_beeswarm.png", plot = beeswarm_plot, width = 10, height = 8, dpi = 150)
+  print(beeswarm_plot)
   
+   # 3 - Bar Plot
   imp_df <- sv_importance(sv, kind = "bar", show_numbers = FALSE)$data
   
   rf_featimp_ranking <- 
@@ -227,10 +257,11 @@ RF_feat_importance <- function(df, target = "alpha_ann", sample_size = 1500) {
     geom_col(show.legend =FALSE)+
     geom_text(aes(label = round(value, 4)), nudge_x = 0.01)+
     scale_fill_gradient(low = "firebrick", high = "dodgerblue4") +
-    labs(title = "SHAP Feature Importance Ranking", y = "", x = "Mean |SHAP|") +
+    labs(title = "Random Forest SHAP Ranking", y = "", x = "Mean (|SHAP|)") +
     theme_minimal()
   
-  # 3 - Bar Plot
+  ggsave("../figures/rf_shap_ranking_bar.png", plot = rf_featimp_ranking, width = 10, height = 8, dpi = 150)
+  
   print(rf_featimp_ranking)
   
   return(list(shapviz = sv, rf_imp = imp))
@@ -254,8 +285,10 @@ rf_figs <- lapply(vars, function(v) {
     )
 })
 
-png("rf_shap_plots.png", width = 16, height = 12, units = "in", res = 150)
+# save image in folder
+png("../figures/rf_shap_dep_plot.png", width = 16, height = 12, units = "in", res = 150)
 gridExtra::grid.arrange(grobs = rf_figs, ncol = 2)
+dev.off()
 ```
 
 # Feature Importance - XGBoost
@@ -281,6 +314,14 @@ XGB_feat_importance <- function(df, target = "alpha_ann", sample_size = 1500) {
     verbose = 0 # TO ENSURE EVALUATION IS CONDUCTED ON A MODEL SIMILAR TO THE FINAL ONE BY PREDICT_ALPHA_... FUNCTION
   )
   
+  # compute evaluation metrics -> verify quality of model on OOS data
+  test_data <- df %>% filter(year(as.Date(caldt)) == pred_year)
+  dtest  <- xgb.DMatrix(data = as.matrix(test_data[, features]))
+  y_pred <- predict(Boost_FI_model, dtest)
+  mse <- mean((test_data[[target]] - y_pred)^2)
+  cat("MSE :", round(mse, 5), "\n")
+  cat("RMSE:", round(sqrt(mse), 5), "\n")
+  
   # sample the data because SHAP on a full boost can be very slow
   X_sample <- as.matrix(train[sample(nrow(train), min(nrow(train), sample_size)), features])
   
@@ -299,8 +340,10 @@ XGB_feat_importance <- function(df, target = "alpha_ann", sample_size = 1500) {
     geom_col(show.legend = FALSE) +
     geom_text(aes(label = round(value, 4)), nudge_x = 0.01) +
     scale_fill_gradient(low = "firebrick", high = "dodgerblue4") +
-    labs(title = "SHAP Feature Importance Ranking", y = "", x = "Mean (|SHAP|)") +
+    labs(title = "XGBoost SHAP Ranking", y = "", x = "Mean (|SHAP|)") +
     theme_minimal()
+  
+  ggsave("../figures/xgb_shap_ranking_bar.png", plot = xgb_featimp_ranking, width = 10, height = 8, dpi = 150)
   print(xgb_featimp_ranking)
   
   return(list(shap_vals = shap_values, shap_long = shap_long))
@@ -308,13 +351,15 @@ XGB_feat_importance <- function(df, target = "alpha_ann", sample_size = 1500) {
 
 # 2 - Dependence Plot
 shap_results <- XGB_feat_importance(df)
-shap.plot.summary(shap_results$shap_long)
+xgb_shap_beeswarm <-shap.plot.summary(shap_results$shap_long)
+ggsave(filename = "../figures/xgb_shap_beeswarm.png", plot = xgb_shap_beeswarm, width = 10, height = 8, dpi = 150)
 
 fig_list = lapply(names(shap_results$shap_vals$mean_shap_score)[1:8], 
                   shap.plot.dependence, 
                   data_long = shap_results$shap_long, dilute = 3)
-png("boost_shap_plots.png", width = 16, height = 12, units = "in", res = 150)
+png("../figures/xgb_shap_dep_plot.png", width = 16, height = 12, units = "in", res = 150)
 gridExtra::grid.arrange(grobs = fig_list, ncol = 2)
+dev.off()
 ```
 
 ## Sanity check
