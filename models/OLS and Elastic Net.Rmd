@@ -139,7 +139,7 @@ ols_featimp_ranking <-
 
 ols_featimp_ranking
 
-ggsave("../figures/variable_importance_SHAP_OLS.jpg", width = 16, height = 12)
+ggsave("../figures/variable_importance_SHAP_OLS.png", width = 16, height = 12)
 ```
 
 ## enet function to be copied to replace the code block in eval
@@ -373,7 +373,7 @@ enet_featimp_ranking <-
 
 enet_featimp_ranking
 
-ggsave("../figures/variable_importance_SHAP_enet.jpg", width = 16, height = 12)
+ggsave("../figures/variable_importance_SHAP_enet.png", width = 16, height = 12)
 ```
 
 
