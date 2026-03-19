@@ -17,24 +17,25 @@ library(caret)
 library(lubridate)
 library(keras3)
 library(tensorflow)
+library(reticulate)
+library(rBayesianOptimization)
 
 df <- read_csv('data/final_data.csv')
 ```
 
 ```{r}
 
+
 predict_alpha_rnn <- function(df, target = "alpha_ann") {
   
   set.seed(4101)
-  if (requireNamespace("tensorflow", quietly = TRUE)) {
-    tensorflow::set_random_seed(4101, disable_gpu = FALSE) 
-  }
+  tensorflow::set_random_seed(4101, disable_gpu = FALSE)
+  start_time = Sys.time()
   
   features <- setdiff(names(df), c("crsp_fundno", "caldt", "alpha_ann"))
   n_feats  <- length(features)
   pred_year <- max(year(df$caldt))
   
-  # Data Splitting
   train_full <- df[year(df$caldt) <  pred_year, ]
   test       <- df[year(df$caldt) == pred_year, ]
   
@@ -49,63 +50,105 @@ predict_alpha_rnn <- function(df, target = "alpha_ann") {
     array(m, dim = c(nrow(m), 1, n_feats))
   }
   
-  X_train <- prep_rnn(tune_train)
-  y_train <- tune_train[[target]]
-  X_val   <- prep_rnn(tune_val)
-  y_val   <- tune_val[[target]]
+  X_train <- prep_rnn(tune_train); y_train <- tune_train[[target]]
+  X_val   <- prep_rnn(tune_val);   y_val   <- tune_val[[target]]
 
-  # Hyperparameter grid
-  grid <- expand.grid(
-    units = c(32, 64),
-    dropout = c(0, 0.2),
-    lr = c(0.001, 0.005)
+  build_custom_lstm <- function(p) {
+    model <- keras_model_sequential()
+    model |> layer_dropout(rate = p$dr_in, input_shape = c(1, n_feats))
+    
+    for (i in 1:p$n_layers) {
+      model |> layer_lstm(
+        units = as.integer(p$units),
+        activation = p$activation,
+        recurrent_activation = "sigmoid", 
+        return_sequences = (i < p$n_layers),
+        kernel_regularizer = regularizer_l2(l = p$wd)
+      )
+      
+      if (p$use_bn && p$bn_pos == "before") model |> layer_batch_normalization()
+      model |> layer_dropout(rate = p$dr_hid)
+      if (p$use_bn && p$bn_pos == "after") model |> layer_batch_normalization()
+    }
+    
+    model |> layer_dense(units = 1)
+    model |> compile(optimizer = optimizer_adam(learning_rate = p$lr), loss = "mse")
+    return(model)
+  }
+
+  # Bayesian optimisation
+  lstm_bayes_func <- function(lr, n_layers, units, dr_in, dr_hid, batch_idx, bn_idx, bn_pos_idx, act_idx, wd, eps) {
+    
+    p <- list(
+      lr = lr, n_layers = as.integer(n_layers), units = as.integer(units),
+      dr_in = dr_in, dr_hid = dr_hid,
+      batch_size = ifelse(batch_idx > 0.5, 64L, 32L),
+      use_bn = ifelse(bn_idx > 0.5, TRUE, FALSE),
+      bn_pos = ifelse(bn_pos_idx > 0.5, "after", "before"),
+      activation = ifelse(act_idx > 0.5, "relu", "tanh"),
+      wd = wd, epochs = as.integer(eps)
+    )
+    
+    model <- build_custom_lstm(p)
+    history <- model |> fit(
+      X_train, y_train, epochs = p$epochs, batch_size = p$batch_size, 
+      verbose = 0, validation_data = list(X_val, y_val),
+      callbacks = list(callback_early_stopping(patience = 3))
+    )
+    
+    val_mse <- min(history$metrics$val_loss)
+    clear_session()
+    return(list(Score = -val_mse, Pred = 0))
+  }
+
+  # Search for hyperparameters
+  message(paste("Tuning all 11 parameters for year:", pred_year))
+  search_res <- BayesianOptimization(
+    FUN = lstm_bayes_func,
+    bounds = list(
+      lr = c(0.001, 0.01), n_layers = c(1L, 2L), units = c(32L, 128L),
+      dr_in = c(0.0, 0.3), dr_hid = c(0.1, 0.5),
+      batch_idx = c(0, 1), bn_idx = c(0, 1), bn_pos_idx = c(0, 1),
+      act_idx = c(0, 1), wd = c(1e-5, 1e-3), eps = c(10L, 50L)
+    ),
+    init_points = 10, n_iter = 15, acq = "ei"
   )
-  
-  grid$mse <- sapply(1:nrow(grid), function(i) {
-    p <- grid[i, ]
-    
-    model <- keras_model_sequential() |>
-      layer_lstm(
-        units = p$units, 
-        dropout = p$dropout,        
-        input_shape = c(1, n_feats)
-      ) |>
-      layer_dense(units = 1)
-    
-    model |> compile(
-      optimizer = optimizer_adam(learning_rate = p$lr),
-      loss = "mse"
-    )
-    
-    model |> fit(
-      X_train, y_train, 
-      epochs = 30, 
-      batch_size = 64, 
-      verbose = 0,
-      validation_data = list(X_val, y_val),
-      callbacks = list(callback_early_stopping(patience = 5))
-    )
-    
-    val_preds <- model |> predict(X_val, verbose = 0)
-    mean((y_val - val_preds)^2)
-  })
 
-  best <- grid[which.min(grid$mse), ]
+  # Refit model with best parameters
+  best_p <- search_res$Best_Par
   
-  # Refit for final model
-  X_full <- prep_rnn(train_full)
-  y_full <- train_full[[target]]
+  best_config <- list(
+    lr = best_p["lr"],
+    n_layers = as.integer(best_p["n_layers"]),
+    units = as.integer(best_p["units"]),
+    dr_in = best_p["dr_in"],
+    dr_hid = best_p["dr_hid"],
+    batch_size = ifelse(best_p["batch_idx"] > 0.5, 64L, 32L),
+    use_bn = ifelse(best_p["bn_idx"] > 0.5, TRUE, FALSE),
+    bn_pos = ifelse(best_p["bn_pos_idx"] > 0.5, "after", "before"),
+    activation = ifelse(best_p["act_idx"] > 0.5, "relu", "tanh"),
+    wd = best_p["wd"],
+    epochs = as.integer(best_p["eps"]) # TUNED EPOCHS USED HERE
+  )
+
+  X_full <- prep_rnn(train_full); y_full <- train_full[[target]]
+  final_model <- build_custom_lstm(best_config)
   
-  final_model <- keras_model_sequential() |>
-    layer_lstm(units = best$units, dropout = best$dropout, input_shape = c(1, n_feats)) |>
-    layer_dense(units = 1)
-  
-  final_model |> compile(optimizer = optimizer_adam(learning_rate = best$lr), loss = "mse")
-  final_model |> fit(X_full, y_full, epochs = 20, batch_size = 64, verbose = 0)
+  # Final fit on 100% of data
+  final_model |> fit(
+    X_full, y_full, 
+    epochs = best_config$epochs, 
+    batch_size = best_config$batch_size, 
+    verbose = 0
+  )
   
   X_test <- prep_rnn(test)
   preds  <- final_model |> predict(X_test, verbose = 0)
   
+  clear_session()
+  end_time = Sys.time()
+  duration = round(difftime(end_time, start_time, units = "mins"), 2)
+  print(duration)
   return(data.frame(
     evaluation_year = pred_year,
     crsp_fundno = test$crsp_fundno,
