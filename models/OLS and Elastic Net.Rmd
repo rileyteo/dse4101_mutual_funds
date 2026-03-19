@@ -16,26 +16,15 @@ knitr::opts_chunk$set(
 
 ```{r}
 #load library
-library(fredr)
 library(dplyr)
 library(tidyr)
-library(purrr)
-library(zoo) 
 library(lubridate)
-library(data.table)
-library(hdm)
 library(glmnet)
-library(forecast)
-library(readxl)
-library(urca)
 library(ggplot2)
-library(corrplot)
-library(randomForest)
 library(lmtest)
-library(sandwich)
 ```
 
-THIINGS TO DO BEFORE U CLICK RUN ALL
+THINGS TO DO BEFORE U CLICK RUN ALL
 1. make sure final_data.csv is in ../data/
 2. Make sure u have qqq_returns.csv in ../data/
 3. replace model code with ur own code (replace dummy_model and the model name after the function when running the expanding window)
@@ -44,85 +33,6 @@ THIINGS TO DO BEFORE U CLICK RUN ALL
 #read in data
 file_path = "../data/final_data.csv"
 df = read.csv(file_path) 
-
-# this function helps to construct a df that stores all the top decile crsp_fundno for every year between 2020 to 2025
-# and also a df that stores all the predicted alphas for every fund
-build_top_decile_history <- function(model_fn,
-                                     entire_df,
-                                     date_col = "caldt",
-                                     fund_col = "crsp_fundno",
-                                     test_start_year = 2020,
-                                     test_end_year = 2025) {
-  
-  # ensure date is Date type
-  df <- entire_df %>%
-    mutate(
-      !!date_col := as.Date(.data[[date_col]])
-    ) %>%
-    arrange(.data[[date_col]])
-  
-  # store yearly outputs
-  all_predictions_list <- list()
-  all_top_decile_list <- list()
-  
-  # loop over each out-of-sample test year
-  for (yr in test_start_year:test_end_year) {
-    
-    # Expanding window:
-    # forecast for most recent year
-    train_cutoff <- as.Date(paste0(yr, "-12-31"))
-    
-    train_df <- df %>%
-      filter(.data[[date_col]] <= train_cutoff)
-    
-    if (nrow(train_df) == 0) {
-      warning(paste0("No training data available for test year ", yr, ". Skipping."))
-      next
-    }
-    
-    # call model. Model output a df that contains evaluation_year, crsp_fundno, predicted_alpha for every single fund
-    model_output <- model_fn(train_df)
-    
-    model_output <- model_output %>%
-      select(
-        evaluation_year,
-        !!fund_col,
-        predicted_alpha
-      ) %>%
-      distinct()
-    
-    all_predictions_list[[as.character(yr)]] <- model_output
-    
-    
-    # keep only top 10% within each evaluation year x rebalance date
-    top_decile_output <- model_output %>%
-      group_by(evaluation_year) %>%
-      arrange(desc(predicted_alpha), .by_group = TRUE) %>%
-      mutate(
-        rank = row_number(),
-        n_funds = n(),
-        cutoff = ceiling(0.10 * n_funds)
-      ) %>%
-      filter(rank <= cutoff) %>%
-      ungroup() %>%
-      select(evaluation_year, !!fund_col, predicted_alpha)
-    
-    all_top_decile_list[[as.character(yr)]] <- top_decile_output
-  }
-  
-  # combine across years
-  all_predictions <- bind_rows(all_predictions_list) %>%
-    arrange(evaluation_year, desc(predicted_alpha))
-  
-  top_decile_history <- bind_rows(all_top_decile_list) %>%
-    arrange(evaluation_year,  desc(predicted_alpha))
-  
-  # return both
-  return(list(
-    all_predictions = all_predictions,
-    top_decile_history = top_decile_history
-  ))
-}
 ```
 
 ## ols function to be copied to replace the code block in eval
@@ -165,32 +75,71 @@ predict_alpha_ols <- function(train_df){
 
   return(result)
 }
+```
 
-# call the function
-results <- build_top_decile_history(
-  model_fn = predict_alpha_ols,           #==================CHANGE MODEL NAME HERE ==========================
-  entire_df = df
+## feature importance of OLS
+```{r}
+df <- df %>%
+    mutate(
+      caldt = as.Date(caldt),
+      year = year(caldt)
+    ) %>%
+    arrange(year, crsp_fundno) %>%
+    drop_na()
+
+# train-test split
+train_df <- df %>% filter (year <= 2024) %>% filter (year >= 2003)
+test_df <- df %>% filter (year == 2025)
+
+# define X and y
+feature_names <- train_df %>%
+  select (-alpha_ann, -crsp_fundno, -caldt, -year) %>%
+  colnames()
+X_train <- train_df %>% select(all_of(feature_names))
+y_train <- train_df$alpha_ann
+
+# fit ols
+formula <- as.formula(
+  paste("alpha_ann ~", paste(feature_names, collapse = " + "))
+)
+model <- lm(formula, data = train_df)
+
+# SHAP = beta * (x - mean)
+coefs <- coef(model)[-1]
+feature_means <- colMeans(X_train)
+
+# compute SHAP on training data
+shap_values <- sweep(X_train, 2, feature_means, "-") %>%
+  sweep(2, coefs, "*") %>%
+  as.data.frame()
+
+# feature importance tibble
+abs_shap <- abs(shap_values)
+abs_shap_mean <- colMeans(abs_shap) %>%
+  sort(decreasing = TRUE)
+importance_df <- tibble(
+  feature = names(abs_shap_mean),
+  importance = abs_shap_mean
 )
 
-# all_predictions can be used to do dm test, rmse etc
-all_predictions <- results$all_predictions
-# save these predictions in csv for RMSE, DM test 
-df_for_dm_test <- df %>%
-  mutate(
-    caldt = as.Date(caldt),
-    evaluation_year = year(caldt)
-  ) %>%
-  inner_join(
-    all_predictions,
-    by = c("evaluation_year", "crsp_fundno")
-  ) %>%
-  transmute(
-    caldt = caldt,
-    fundno = crsp_fundno,
-    actual_alpha = alpha_ann,
-    predicted_alpha = predicted_alpha
-  ) %>%
-  arrange(caldt, fundno)
+# plot
+ols_featimp_ranking <- 
+  ggplot(importance_df, 
+         aes(y = reorder(feature, importance),
+             x = importance,
+             fill = importance)) +
+  geom_col(show.legend = FALSE) +
+  scale_fill_gradient(low = "firebrick", high = "dodgerblue4") +
+  labs(
+    title = "OLS SHAP Ranking",
+    y = "",
+    x = "Mean (|SHAP|)"
+  ) +
+  theme_minimal()
+
+ols_featimp_ranking
+
+ggsave("../figures/variable_importance_SHAP_OLS.jpg", width = 16, height = 12)
 ```
 
 ## enet function to be copied to replace the code block in eval
@@ -299,35 +248,147 @@ predict_alpha_enet <- function(train_df){
       predicted_alpha = as.numeric(pred_enet)
     )
 
-  return(result)
+  param_df <- tibble(
+    evaluation_year = evaluation_year,
+    alpha = best_alpha,
+    lambda = best_lambda,
+    mse = best_mse
+    )
+
+  return(list(
+    predictions = result,
+    params = param_df
+    ))
+}
+```
+
+## feature importance for enet
+```{r}
+run_enet_expanding <- function(df,
+                               test_start_year = 2020,
+                               test_end_year = 2025){
+
+  df <- df %>%
+    mutate(
+      caldt = as.Date(caldt),
+      year = year(caldt)
+    ) %>%
+    arrange(caldt) %>%
+    drop_na()
+
+  all_predictions_list <- list()
+  all_param_list <- list()
+
+  for (yr in test_start_year:test_end_year){
+
+    cat("Processing year:", yr, "\n")
+    train_df <- df %>%
+      filter(year <= yr)
+
+    if (nrow(train_df) == 0){
+      warning(paste("No data for year", yr))
+      next
+    }
+    model_output <- predict_alpha_enet(train_df)
+
+    if (is.null(model_output)) next
+
+    all_predictions_list[[as.character(yr)]] <- model_output$predictions
+    all_param_list[[as.character(yr)]] <- model_output$params
+  }
+
+  all_predictions <- bind_rows(all_predictions_list) %>%
+    arrange(evaluation_year, crsp_fundno)
+
+  all_params <- bind_rows(all_param_list) %>%
+    arrange(evaluation_year)
+
+  return(list(
+    all_predictions = all_predictions,
+    all_params = all_params
+  ))
 }
 
-# call the function
-results <- build_top_decile_history(
-  model_fn = predict_alpha_enet,           #==================CHANGE MODEL NAME HERE ==========================
-  entire_df = df
+results <- run_enet_expanding(df)
+all_predictions <- results$all_predictions
+all_params <- results$all_params
+
+# select best alpha and lambda
+best_global <- all_params %>%
+  arrange(mse) %>%
+  slice(1)
+
+best_alpha  <- best_global$alpha
+best_lambda <- best_global$lambda
+
+# latest model
+train_final <- df %>% filter(year <= 2024)
+
+X_final <- as.matrix(train_final[, feature_names])
+y_final <- train_final$alpha_ann
+
+final_model <- glmnet(
+  X_final,
+  y_final,
+  alpha = best_alpha,
+  lambda = best_lambda
 )
 
-# all_predictions can be used to do dm test, rmse etc
-all_predictions <- results$all_predictions
-# save these predictions in csv for RMSE, DM test 
-df_for_dm_test <- df %>%
-  mutate(
-    caldt = as.Date(caldt),
-    evaluation_year = year(caldt)
-  ) %>%
-  inner_join(
-    all_predictions,
-    by = c("evaluation_year", "crsp_fundno")
-  ) %>%
-  transmute(
-    caldt = caldt,
-    fundno = crsp_fundno,
-    actual_alpha = alpha_ann,
-    predicted_alpha = predicted_alpha
-  ) %>%
-  arrange(caldt, fundno)
+# SHAP of final model
+# coefficients
+coef_vec <- as.matrix(coef(final_model))[-1, , drop = FALSE]
+beta <- as.numeric(coef_vec)
+
+# means
+mu <- colMeans(X_final)
+
+# SHAP
+shap_values <- sweep(X_final, 2, mu, "-") %>%
+  sweep(2, beta, "*") %>%
+  as.data.frame()
+
+abs_shap <- abs(shap_values)
+
+importance <- colMeans(abs_shap) %>%
+  sort(decreasing = TRUE)
+
+imp_df <- tibble(
+  feature = names(importance),
+  value = importance
+)
+
+enet_featimp_ranking <- 
+  ggplot(imp_df,
+         aes(y = reorder(feature, value),
+             x = value,
+             fill = value)) +
+  geom_col(show.legend = FALSE) +
+  scale_fill_gradient(low = "firebrick", high = "dodgerblue4") +
+  labs(
+    title = "Elastic Net SHAP Ranking",
+    y = "",
+    x = "Mean (|SHAP|)"
+  ) +
+  theme_minimal()
+
+enet_featimp_ranking
+
+ggsave("../figures/variable_importance_SHAP_enet.jpg", width = 16, height = 12)
 ```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
