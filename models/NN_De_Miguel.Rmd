@@ -90,6 +90,14 @@ predict_alpha_nn_h2o <- function(df, target = "alpha_ann") {
   # Identify best model
   grid_results <- h2o::h2o.getGrid(grid@grid_id, sort_by = "mse", decreasing = FALSE)
   best_model <- h2o::h2o.getModel(grid_results@model_ids[[1]])
+  cat("\n==============================================\n")
+  cat(sprintf("Best Hyperparameters for Year %d:\n", pred_year))
+  cat(sprintf("  - Hidden Layers:  %s\n", paste(best_model@parameters$hidden, collapse = ", ")))
+  cat(sprintf("  - L1 Reg:         %e\n", best_model@parameters$l1))
+  cat(sprintf("  - L2 Reg:         %e\n", best_model@parameters$l2))
+  cat(sprintf("  - Input Dropout:  %.2f\n", best_model@parameters$input_dropout_ratio))
+  cat(sprintf("  - MSE: %.6f\n", as.numeric(grid_results@summary_table$mse[1])))
+  cat("==============================================\n")
   
   seeds <- c(4101, 4102, 4103, 4104, 4105)
   ensemble_preds <- matrix(0, nrow = nrow(test), ncol = length(seeds))
@@ -124,86 +132,23 @@ predict_alpha_nn_h2o <- function(df, target = "alpha_ann") {
     predicted_alpha = rowMeans(ensemble_preds) 
   )
   
-  res_params <- data.frame(
-    evaluation_year = pred_year,
-    layers = length(best_model@parameters$hidden),
-    l1 = best_model@parameters$l1,
-    l2 = best_model@parameters$l2,
-    mse = grid_results@summary_table$mse[1]
-  )
   
   # Cleanup H2O memory
   h2o::h2o.rm(train_h2o); h2o::h2o.rm(val_h2o); h2o::h2o.rm(test_h2o); h2o::h2o.rm(full_train_h2o)
   duration <- round(difftime(Sys.time(), start_time, units = "mins"), 2)
   message(paste("Year", pred_year, "complete in", duration, "minutes"))
   
-  return(list(predictions = res_preds, params = res_params))
+  return(res_preds)
 }
 ```
 
 ```{r}
-# result = predict_alpha_nn_h2o(df)
+result = predict_alpha_nn_h2o(df)
 ```
 
-```{r}
-run_nn_h2o_expanding <- function(full_df, start_year = 2020, end_year = 2025) {
-  
-  all_preds_list <- list()
-  all_params_list <- list()
-  
-  for (yr in start_year:end_year) {
 
-    if(!"year" %in% names(full_df)) {
-      full_df$year <- lubridate::year(full_df$caldt)
-    }
-    current_window_df <- full_df %>% filter(year <= yr)
-    
-    feature_cols <- setdiff(names(current_window_df), 
-                            c("crsp_fundno", "caldt", "alpha_ann", "year"))
-    
-    train_indices <- which(current_window_df$year < yr)
-    
-    scaler_obj <- preProcess(current_window_df[train_indices, feature_cols], 
-                             method = c("center", "scale"))
-    
-    scaled_window_df <- current_window_df
-    scaled_window_df[, feature_cols] <- predict(scaler_obj, current_window_df[, feature_cols])
-    
-    res <- predict_alpha_nn_h2o(scaled_window_df)
-    
-    all_preds_list[[as.character(yr)]]  <- res$predictions
-    all_params_list[[as.character(yr)]] <- res$params
-    
-    message(paste("Year", yr, "Complete"))
-  }
-  
-  final_predictions <- bind_rows(all_preds_list)
-  final_params      <- bind_rows(all_params_list)
-  
-  return(list(
-    all_predictions = final_predictions,
-    all_params      = final_params
-  ))
-}
-
-
-h2o_results <- run_nn_h2o_expanding(df)
-
-all_predictions_h2o <- h2o_results$all_predictions
-all_params_h2o      <- h2o_results$all_params
-```
 
 ```{r}
-
-best_row <- all_params_h2o %>%
-  arrange(mse) %>% 
-  slice(1)
-
-best_layers <- if(best_row$layers == 1) c(32) else 
-               if(best_row$layers == 2) c(32, 16) else c(32, 16, 8)
-
-message(paste("Final Model selected: Layers =", best_row$layers, 
-              "| L1 =", best_row$l1, "| L2 =", best_row$l2))
 
 final_train_df <- df %>% filter(lubridate::year(caldt) <= 2024)
 feature_names  <- setdiff(names(final_train_df), c("crsp_fundno", "caldt", "alpha_ann", "year"))
@@ -219,12 +164,16 @@ final_h2o_model <- h2o.deeplearning(
   y = "alpha_ann",
   training_frame = "FINAL_NN_DATA",
   model_id = "BEST_NN_MODEL",
-  hidden = best_layers,
-  l1 = best_row$l1,
-  l2 = best_row$l2,
-  activation = "TanhWithDropout",
-  epochs = 100, 
-  seed = 4101
+  hidden              = c(32),           
+  l1                  = 1e-4,                  
+  l2                  = 1e-3,                  
+  input_dropout_ratio = 0.05,                  
+  activation     = "TanhWithDropout",          
+  epochs         = 50,                         
+  standardize    = TRUE,                       
+  adaptive_rate  = TRUE,                       
+  seed           = 4101,                       
+  reproducible   = TRUE                        
 )
 
 set.seed(4101)
@@ -262,9 +211,7 @@ nn_shap_ranking_plot <- ggplot(imp_df_nn,
             nudge_x = max(imp_df_nn$value) * 0.05, 
             size = 3.5) +
   scale_fill_gradient(low = "firebrick", high = "dodgerblue4") +
-  labs(title = "Neural Network SHAP Ranking",
-       subtitle = paste0("Model: ", best_row$layers, " Layers | Calculated on 1,500 samples"),
-       y = "", x = "Mean (|SHAP|)") +
+  labs(title = "Neural Network SHAP Ranking") +
   theme_minimal() +
   scale_x_continuous(expand = expansion(mult = c(0, .15)))
 
