@@ -19,13 +19,14 @@ library(keras3)
 library(tensorflow)
 library(reticulate)
 library(rBayesianOptimization)
+library(fastshap)
+library(tidyverse)
 
 df <- read_csv('data/final_data.csv')
 ```
 
+
 ```{r}
-
-
 predict_alpha_rnn <- function(df, target = "alpha_ann") {
   
   set.seed(4101)
@@ -109,9 +110,9 @@ predict_alpha_rnn <- function(df, target = "alpha_ann") {
       lr = c(0.001, 0.01), n_layers = c(1L, 2L), units = c(32L, 128L),
       dr_in = c(0.0, 0.3), dr_hid = c(0.1, 0.5),
       batch_idx = c(0, 1), bn_idx = c(0, 1), bn_pos_idx = c(0, 1),
-      act_idx = c(0, 1), wd = c(1e-5, 1e-3), eps = c(10L, 50L)
+      act_idx = c(0, 0), wd = c(1e-5, 1e-3), eps = c(10L, 50L)
     ),
-    init_points = 10, n_iter = 15, acq = "ei"
+    init_points = 2, n_iter = 2, acq = "ei"
   )
 
   # Refit model with best parameters
@@ -126,9 +127,9 @@ predict_alpha_rnn <- function(df, target = "alpha_ann") {
     batch_size = ifelse(best_p["batch_idx"] > 0.5, 64L, 32L),
     use_bn = ifelse(best_p["bn_idx"] > 0.5, TRUE, FALSE),
     bn_pos = ifelse(best_p["bn_pos_idx"] > 0.5, "after", "before"),
-    activation = ifelse(best_p["act_idx"] > 0.5, "relu", "tanh"),
+    activation = ifelse(best_p["act_idx"] > 0.5, "tanh", "tanh"),
     wd = best_p["wd"],
-    epochs = as.integer(best_p["eps"]) # TUNED EPOCHS USED HERE
+    epochs = as.integer(best_p["eps"]) 
   )
 
   X_full <- prep_rnn(train_full); y_full <- train_full[[target]]
@@ -149,16 +150,156 @@ predict_alpha_rnn <- function(df, target = "alpha_ann") {
   end_time = Sys.time()
   duration = round(difftime(end_time, start_time, units = "mins"), 2)
   print(duration)
+  
+  cat(sprintf(
+    "\n========================================================
+[Hyperparameter summary] Year: %d
+--------------------------------------------------------
+Best MSE:             %.8f
+--------------------------------------------------------
+1.  Learning Rate:    %.5f
+2.  Hidden Layers:    %d
+3.  Units per Layer:  %d
+4.  Dropout (Input):  %.2f
+5.  Dropout (Hidden): %.2f
+6.  Mini-Batch Size:  %d
+7.  Batch Norm:       %s
+8.  BN Position:      %s
+9.  Activation:       %s
+10. Weight Decay:     %.6f
+11. Epochs:           %d
+========================================================\n",
+    pred_year,
+    -search_res$Best_Value,         # MSE
+    best_config$lr,                 # 1. Learning Rate
+    best_config$n_layers,           # 2. Hidden Layers
+    best_config$units,              # 3. Units
+    best_config$dr_in,              # 4. Dropout Input
+    best_config$dr_hid,             # 5. Dropout Hidden
+    best_config$batch_size,         # 6. Mini-batch size
+    as.character(best_config$use_bn),# 7. Use BN?
+    best_config$bn_pos,             # 8. BN Position (Before/After)
+    best_config$activation,         # 9. Activation
+    best_config$wd,                 # 10. Weight Decay
+    best_config$epochs              # 11. Number of Epochs
+  ))
+  
   return(data.frame(
     evaluation_year = pred_year,
     crsp_fundno = test$crsp_fundno,
     predicted_alpha = as.numeric(preds)
   ))
 }
+
 ```
+
+
+
+## Feature analysis
 
 ```{r}
 
-result <- predict_alpha_rnn(df)
+build_custom_lstm <- function(p) {
+    model <- keras_model_sequential()
+    
+    model |> layer_dropout(rate = p$dr_in, input_shape = c(1, n_feats))
+    
+    for (i in 1:p$n_layers) {
+      model |> layer_lstm(
+        units = as.integer(p$units),
+        activation = p$activation,
+        recurrent_activation = "sigmoid", 
+        return_sequences = (i < p$n_layers),
+        kernel_regularizer = regularizer_l2(l = p$wd)
+      )
+      
+      if (p$use_bn && p$bn_pos == "before") model |> layer_batch_normalization()
+      model |> layer_dropout(rate = p$dr_hid)
+      if (p$use_bn && p$bn_pos == "after") model |> layer_batch_normalization()
+    }
+    
+    model |> layer_dense(units = 1)
+    
+    model |> compile(
+      optimizer = optimizer_adam(learning_rate = p$lr, clipnorm = 1.0), 
+      loss = "mse"
+    )
+    return(model)
+  }
 
+
+feature_names <- setdiff(names(df), c("crsp_fundno", "caldt", "alpha_ann", "year"))
+n_feats <- length(feature_names)
+
+
+best_config <- list(
+  lr          = 0.00523,      # 1. Learning Rate
+  n_layers    = 1L,           # 2. Hidden Layers (L for integer)
+  units       = 89L,         # 3. Units per Layer
+  dr_in       = 0.27,         # 4. Dropout (Input)
+  dr_hid      = 0.24,         # 5. Dropout (Hidden)
+  batch_size  = 32L,          # 6. Mini-Batch Size
+  use_bn      = FALSE,        # 7. Batch Norm
+  bn_pos      = "after",     # 8. BN Position
+  activation  = "tanh",       # 9. Activation
+  wd          = 0.000413,     # 10. Weight Decay
+  epochs      = 30L           # 11. Epochs
+)
+
+
+# Train on latest window
+train_final <- df %>% filter(year(caldt) <= 2024)
+X_final_raw <- as.matrix(train_final[, feature_names])
+y_final     <- train_final$alpha_ann
+
+# Re-scale based on the final training set
+scaler_final   <- preProcess(X_final_raw, method = c("center", "scale"))
+X_final_scaled <- predict(scaler_final, X_final_raw)
+
+X_final_3d <- array(X_final_scaled, dim = c(nrow(X_final_scaled), 1, length(feature_names)))
+
+# Fit model
+
+final_rnn_model <- build_custom_lstm(best_config) 
+final_rnn_model %>% fit(
+  X_final_3d, y_final,
+  epochs = best_config$epochs,
+  batch_size = best_config$batch_size,
+  verbose = 1
+)
+
+set.seed(4101)
+sample_idx <- sample(seq_len(nrow(X_final_scaled)), size = 1500)
+X_sample <- as.data.frame(X_final_scaled[sample_idx, ])
+
+rnn_shap_wrapper <- function(object, newdata) {
+  arr <- array(as.matrix(newdata), dim = c(nrow(newdata), 1, ncol(newdata)))
+  as.vector(predict(object, arr, verbose = 0))
+}
+
+shap_values_rnn <- explain(
+  final_rnn_model,
+  X = X_sample,
+  pred_wrapper = rnn_shap_wrapper,
+  nsim = 20,
+  adjust = TRUE
+)
+
+imp_df_rnn <- tibble(
+  feature = colnames(shap_values_rnn),
+  value = colMeans(abs(shap_values_rnn))
+) %>% arrange(desc(value))
+
+rnn_shap_ranking_plot <- ggplot(imp_df_rnn, 
+       aes(y = reorder(feature, value), x = value, fill = value)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = round(value, 5)), nudge_x = max(imp_df_rnn$value)*0.05) +
+  scale_fill_gradient(low = "firebrick", high = "dodgerblue4") +
+  labs(title = "RNN LSTM SHAP Ranking (Best Window Params)",
+       subtitle = "Calculated on 1,500 training samples",
+       y = "", x = "Mean (|SHAP|)") +
+  theme_minimal()
+
+print(rnn_shap_ranking_plot)
+ggsave("../figures/rnn_shap_ranking_bar.png", width = 10, height = 8)
 ```
