@@ -31,7 +31,7 @@ df <- df %>%
     manager_tenure_months = (year(caldt) - year(mgr_dt)) * 12 + (month(caldt) - month(mgr_dt))
   ) %>% mutate(manager_tenure = manager_tenure_months/12 )
 
-df_filtered = df %>% filter(age_months >= 36) %>% filter(tna_latest >= 5)
+df_filtered = df %>% filter(age_months >= 36) %>% filter(tna_latest >= 5) 
 
 #find out which funds are passively managed or is tracking an index
 df_filtered = df_filtered %>%  filter(!et_flag %in% c("F", "N"), !index_fund_flag %in% c("B","D","E"))
@@ -80,7 +80,7 @@ df_merged = df_returns_filter %>% left_join(df_ff_mom ,by = "caldt") %>%    muta
     .cols = -all_of(id_cols),
     .fns  = ~ readr::parse_number(as.character(.x))
   )
-)
+) %>% arrange(desc(caldt))
 
 #compute fund excess return
 df_merged = df_merged %>% mutate(rexcess = mret - rf)
@@ -271,40 +271,35 @@ df_final = df_final %>%
   left_join(value_added_ann, by = c("crsp_fundno", "year")) %>% select(-year)
   
 
-  
-#extract value added annually (not exactly the same as the authors but a good approximation, mention this in report)
-#df_final = df_final %>%   group_by(crsp_fundno) %>%
-  #arrange(caldt, .by_group = TRUE) %>%
-  #mutate(tna_lag = lag(tna_latest, 1L)) %>%
-  #ungroup() %>% mutate(value_added = (alpha_ann + exp_ratio) * tna_lag) %>% select(-tna_lag)
-
 
 #standardise columns (according to author, standardise across funds in 1 year and imputing NA values with 0 is ok)
-df_std <- df_final %>%
-  mutate(year = year(caldt)) %>%
-  group_by(year) %>%
-  mutate(across(
-    .cols = where(is.numeric) & !any_of(c("year", "crsp_fundno")),   # standardize all numeric except year
-    .fns  = ~ {
-      mu <- mean(.x, na.rm = TRUE)
-      sdv <- sd(.x, na.rm = TRUE)
-      z <- (.x - mu) / sdv
-      z[is.na(z)] <- 0
-      z
-    }
-  )) %>%
-  ungroup() %>% select(-year)
+# Standardising will be done in expanding window function in evaluation file
 
-df_std <- df_std %>%
+# df_std <- df_final %>%
+#   mutate(year = year(caldt)) %>%
+#   group_by(year) %>%
+#   mutate(across(
+#     .cols = where(is.numeric) & !any_of(c("year", "crsp_fundno")),   # standardize all numeric except year
+#     .fns  = ~ {
+#       mu <- mean(.x, na.rm = TRUE)
+#       sdv <- sd(.x, na.rm = TRUE)
+#       z <- (.x - mu) / sdv
+#       z[is.na(z)] <- 0
+#       z
+#     }
+#   )) %>%
+#   ungroup() %>% select(-year)
+
+df_final <- df_final %>%
   mutate(year = year(caldt)) %>% select (-n_months)
 
 # lag predictors
 predictor_vars <- setdiff(
-  names(df_std),
+  names(df_final),
   c("crsp_fundno", "year", "alpha_ann", "caldt")
 )
 
-df_ml <- df_std %>%
+df_ml <- df_final %>%
   arrange(crsp_fundno, year) %>%
   group_by(crsp_fundno) %>%
   mutate(
@@ -319,9 +314,11 @@ df_ml <- df_std %>%
   ) %>%
   ungroup() %>% select (-year)
 
-# drop first line
+# drop first line (year 2002) that becomes NA due to lagg and drop any rows where alpha annualised is NA
+# year 2003 also mostly NA so drop
+
 df_ml <- df_ml %>%
-  filter(!is.na(alpha_ann_lag))
+  filter(!year(caldt) %in% c('2002', '2003')) %>% drop_na(alpha_ann)
 
 # select
 df_ml <- df_ml %>%
@@ -334,7 +331,6 @@ df_ml <- df_ml %>%
 
 write.csv(df_ml, "../data/final_data.csv", row.names = FALSE)
 
-#check how many funds per year
 funds_per_year <- df_ml %>%
   mutate(year = year(caldt)) %>%
   group_by(year) %>%
