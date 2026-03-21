@@ -243,7 +243,7 @@ RF_feat_importance <- function(df, target = "alpha_ann", sample_size = 1500) {
   sv <- shapviz(shap_results, X = X_sample)
   
   # 2 - Beeswarm Plot
-  beeswarm_plot <- sv_importance(sv, kind = "beeswarm") + labs(title = "Random Forest SHAP Summary")
+  beeswarm_plot <- sv_importance(sv, kind = "beeswarm", viridis_args = list(option = 'inferno', direction = -1)) + labs(title = "SHAP Summary")
   ggsave("../figures/rf_shap_beeswarm.png", plot = beeswarm_plot, width = 10, height = 8, dpi = 150)
   print(beeswarm_plot)
   
