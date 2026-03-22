@@ -45,9 +45,8 @@ predict_alpha_rnn <- function(df, target = "alpha_ann") {
   tune_train <- train_full[year(train_full$caldt) <= cutoff, ]
   tune_val   <- train_full[year(train_full$caldt) >  cutoff, ]
   
-  scaler   <- preProcess(as.matrix(tune_train[, features]), method = c("center", "scale"))
   prep_rnn <- function(data) {
-    m <- predict(scaler, as.matrix(data[, features]))
+    m <- as.matrix(data[, features])
     array(m, dim = c(nrow(m), 1, n_feats))
   }
   
