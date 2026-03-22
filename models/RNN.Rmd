@@ -22,7 +22,7 @@ library(rBayesianOptimization)
 library(fastshap)
 library(tidyverse)
 
-df <- read_csv('data/final_data.csv')
+df <- read_csv('../data/final_data.csv')
 ```
 
 
@@ -72,7 +72,7 @@ predict_alpha_rnn <- function(df, target = "alpha_ann") {
     }
     
     model |> layer_dense(units = 1)
-    model |> compile(optimizer = optimizer_adam(learning_rate = p$lr), loss = "mse")
+    model |> compile(optimizer = optimizer_adam(learning_rate = p$lr, clipnorm = 1.0), loss = "mse")
     return(model)
   }
 
@@ -85,7 +85,7 @@ predict_alpha_rnn <- function(df, target = "alpha_ann") {
       batch_size = ifelse(batch_idx > 0.5, 64L, 32L),
       use_bn = ifelse(bn_idx > 0.5, TRUE, FALSE),
       bn_pos = ifelse(bn_pos_idx > 0.5, "after", "before"),
-      activation = ifelse(act_idx > 0.5, "relu", "tanh"),
+      activation = "tanh",
       wd = wd, epochs = as.integer(eps)
     )
     
@@ -111,7 +111,7 @@ predict_alpha_rnn <- function(df, target = "alpha_ann") {
       batch_idx = c(0, 1), bn_idx = c(0, 1), bn_pos_idx = c(0, 1),
       act_idx = c(0, 0), wd = c(1e-5, 1e-3), eps = c(10L, 50L)
     ),
-    init_points = 2, n_iter = 2, acq = "ei"
+    init_points = 10, n_iter = 15, acq = "ei"
   )
 
   # Refit model with best parameters
@@ -126,7 +126,7 @@ predict_alpha_rnn <- function(df, target = "alpha_ann") {
     batch_size = ifelse(best_p["batch_idx"] > 0.5, 64L, 32L),
     use_bn = ifelse(best_p["bn_idx"] > 0.5, TRUE, FALSE),
     bn_pos = ifelse(best_p["bn_pos_idx"] > 0.5, "after", "before"),
-    activation = ifelse(best_p["act_idx"] > 0.5, "tanh", "tanh"),
+    activation = "tanh",
     wd = best_p["wd"],
     epochs = as.integer(best_p["eps"]) 
   )
@@ -190,6 +190,7 @@ Best MSE:             %.8f
   ))
 }
 
+
 ```
 
 
@@ -197,6 +198,7 @@ Best MSE:             %.8f
 ## Feature analysis
 
 ```{r}
+df_for_shap_analysis = read_csv('../data/df_for_shap_analysis.csv')
 
 build_custom_lstm <- function(p) {
     model <- keras_model_sequential()
@@ -232,22 +234,22 @@ n_feats <- length(feature_names)
 
 
 best_config <- list(
-  lr          = 0.00523,      # 1. Learning Rate
-  n_layers    = 1L,           # 2. Hidden Layers (L for integer)
-  units       = 89L,         # 3. Units per Layer
-  dr_in       = 0.27,         # 4. Dropout (Input)
+  lr          = 0.00925,      # 1. Learning Rate
+  n_layers    = 2L,           # 2. Hidden Layers (L for integer)
+  units       = 86L,         # 3. Units per Layer
+  dr_in       = 0.01,         # 4. Dropout (Input)
   dr_hid      = 0.24,         # 5. Dropout (Hidden)
   batch_size  = 32L,          # 6. Mini-Batch Size
   use_bn      = FALSE,        # 7. Batch Norm
   bn_pos      = "after",     # 8. BN Position
   activation  = "tanh",       # 9. Activation
-  wd          = 0.000413,     # 10. Weight Decay
-  epochs      = 30L           # 11. Epochs
+  wd          = 0.000304,     # 10. Weight Decay
+  epochs      = 37L           # 11. Epochs
 )
 
 
 # Train on latest window
-train_final <- df %>% filter(year(caldt) <= 2024)
+train_final <- df_for_shap_analysis %>% filter(year(caldt) <= 2024)
 X_final_raw <- as.matrix(train_final[, feature_names])
 y_final     <- train_final$alpha_ann
 
@@ -292,10 +294,11 @@ imp_df_rnn <- tibble(
 rnn_shap_ranking_plot <- ggplot(imp_df_rnn, 
        aes(y = reorder(feature, value), x = value, fill = value)) +
   geom_col(show.legend = FALSE) +
-  geom_text(aes(label = round(value, 5)), nudge_x = max(imp_df_rnn$value)*0.05) +
+  geom_text(aes(label = format(value, scientific = FALSE, digits = 2, nsmall = 5)), 
+            hjust = -0.1, 
+            size = 3) +
   scale_fill_gradient(low = "firebrick", high = "dodgerblue4") +
-  labs(title = "RNN LSTM SHAP Ranking (Best Window Params)",
-       subtitle = "Calculated on 1,500 training samples",
+  labs(title = "RNN LSTM SHAP Ranking",
        y = "", x = "Mean (|SHAP|)") +
   theme_minimal()
 
