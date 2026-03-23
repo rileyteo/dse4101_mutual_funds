@@ -1,0 +1,87 @@
+---
+title: "Front and Rear Loads"
+output: html_document
+date: "2026-03-17"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+```{r}
+#Load library
+library(dplyr)
+```
+
+
+```{r}
+# read in data
+# data from data_tech_update_lag.R file
+file_path = "../data/final_data.csv"
+df = read.csv(file_path) 
+
+df_front_load = read.csv("../data/front_load.csv")
+df_rear_load = read.csv("../data/rear_load.csv")
+
+```
+
+```{r}
+# Rear Load Data
+# Filter to keep only load type = 'C'
+rear_summary <- df_rear_load %>% filter(load_type == "C") %>%
+  group_by(crsp_fundno, begdt, enddt) %>%
+  summarise(rear_load = max(rear_load, na.rm = TRUE)) %>%
+  ungroup() %>%
+  rename(rear_begdt = begdt, rear_enddt = enddt)
+
+
+df_rear <- df %>%
+  left_join(rear_summary, by = "crsp_fundno") %>%
+  mutate(rear_load = ifelse(caldt >= rear_begdt & caldt <= rear_enddt, rear_load, NA)) %>%
+  group_by(crsp_fundno, caldt) %>%
+  summarise(rear_load = max(rear_load, na.rm = TRUE), .groups = "drop") %>% 
+  mutate(rear_load = ifelse(is.infinite(rear_load) | is.nan(rear_load), 0, rear_load)) %>% 
+  right_join(df, by = c("crsp_fundno", "caldt")) %>%  # bring back all original df rows
+  mutate(rear_load = coalesce(rear_load, 0))
+
+```
+
+```{r}
+#Front Load Data
+front_summary <- df_front_load %>%
+  group_by(crsp_fundno, begdt, enddt) %>%
+  summarise(front_load = max(front_load, na.rm = TRUE)) %>%
+  ungroup() %>%
+  rename(front_begdt = begdt, front_enddt = enddt)
+
+df_loads <- df_rear %>%
+  left_join(front_summary, by = "crsp_fundno") %>%
+  mutate(front_load = ifelse(caldt >= front_begdt & caldt <= front_enddt, front_load, NA)) %>% # ensure that fee structure is still valid for the fund
+  group_by(crsp_fundno, caldt) %>%
+  summarise(front_load = max(front_load, na.rm = TRUE), .groups = "drop") %>% 
+  mutate(front_load = ifelse(is.infinite(front_load) | is.nan(front_load), 0, front_load)) %>% 
+  right_join(df_rear, by = c("crsp_fundno", "caldt")) %>%  # bring back all original df rows
+  mutate(front_load = coalesce(front_load, 0)) %>%
+  select(-rear_load, -front_load, everything(), rear_load, front_load) 
+```
+
+```{r}
+load_by_year <- df_loads %>%
+  mutate(year = year(caldt)) %>%
+  group_by(year) %>%
+  summarise(buy_fee = mean(front_load, na.rm = TRUE),
+            sell_fee = mean(rear_load, na.rm = TRUE),
+            .groups = "drop")
+
+```
+
+```{r}
+#run only to save csv
+write.csv(load_by_year, "loads_by_year.csv", row.names = FALSE)
+```
+
+
