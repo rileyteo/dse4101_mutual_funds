@@ -149,25 +149,23 @@ result = predict_alpha_nn_h2o(df)
 
 
 ```{r}
+df_for_shap_analysis = read_csv('../data/df_for_shap_analysis.csv')
 
-final_train_df <- df %>% filter(lubridate::year(caldt) <= 2024)
+final_train_df <- df_for_shap_analysis %>% filter(lubridate::year(caldt) <= 2024)
 feature_names  <- setdiff(names(final_train_df), c("crsp_fundno", "caldt", "alpha_ann", "year"))
 
-scaler_final    <- caret::preProcess(final_train_df[, feature_names], method = c("center", "scale"))
-scaled_final_df <- predict(scaler_final, final_train_df)
-
 h2o.removeAll() 
-final_h2o_data <- as.h2o(scaled_final_df, destination_frame = "FINAL_NN_DATA")
+final_h2o_data <- as.h2o(final_train_df, destination_frame = "FINAL_NN_DATA")
 
 final_h2o_model <- h2o.deeplearning(
   x = feature_names,
   y = "alpha_ann",
   training_frame = "FINAL_NN_DATA",
   model_id = "BEST_NN_MODEL",
-  hidden              = c(32),           
-  l1                  = 1e-4,                  
-  l2                  = 1e-3,                  
-  input_dropout_ratio = 0.05,                  
+  hidden              = c(32, 16),           
+  l1                  = 1e-3,                  
+  l2                  = 1e-4,                  
+  input_dropout_ratio = 0.1,                  
   activation     = "TanhWithDropout",          
   epochs         = 50,                         
   standardize    = TRUE,                       
