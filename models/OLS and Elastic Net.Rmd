@@ -31,7 +31,7 @@ THINGS TO DO BEFORE U CLICK RUN ALL
 
 ```{r}
 #read in data
-file_path = "../data/final_data.csv"
+file_path = "../data/df_for_shap_analysis.csv"
 df = read.csv(file_path) 
 ```
 
@@ -88,7 +88,7 @@ df <- df %>%
     drop_na()
 
 # train-test split
-train_df <- df %>% filter (year <= 2024) %>% filter (year >= 2003)
+train_df <- df %>% filter (year <= 2024) %>% filter (year >= 2004)
 test_df <- df %>% filter (year == 2025)
 
 # define X and y
@@ -98,22 +98,22 @@ feature_names <- train_df %>%
 X_train_raw <- train_df %>% select(all_of(feature_names))
 
 # no data leakage standardization
-mu <- colMeans(X_train_raw)
-sigma <- apply(X_train_raw, 2, sd)
+#mu <- colMeans(X_train_raw)
+#sigma <- apply(X_train_raw, 2, sd)
 # avoid division by 0
-sigma[sigma == 0] <- 1
-X_train <- sweep(X_train_raw, 2, mu, "-") %>%
-  sweep(2, sigma, "/") %>%
-  as.data.frame()
-y_train <- train_df$alpha_ann
+#sigma[sigma == 0] <- 1
+#X_train <- sweep(X_train_raw, 2, mu, "-") %>%
+  #sweep(2, sigma, "/") %>%
+  #as.data.frame()
+#y_train <- train_df$alpha_ann
 
 # fit ols
 formula <- as.formula(
   paste("alpha_ann ~", paste(feature_names, collapse = " + "))
 )
-train_scaled <- train_df
-train_scaled[feature_names] <- X_train
-model <- lm(formula, data = train_scaled)
+
+train_df[feature_names] <- X_train
+model <- lm(formula, data = train_df)
 
 # SHAP = beta * (x - mean)
 coefs <- coef(model)[-1]
@@ -146,7 +146,7 @@ ols_featimp_ranking <-
 
 ols_featimp_ranking
 
-ggsave("../figures/variable_importance_SHAP_OLS.png", width = 16, height = 12)
+ggsave("../figures/ols_shap_plot.png", width = 16, height = 12)
 ```
 
 ## enet function to be copied to replace the code block in eval
@@ -249,30 +249,27 @@ predict_alpha_enet <- function(train_df){
   pred_enet <- predict(enet_model, newx = X_test)
 
   result <- test_data %>%
-    transmute(
-      evaluation_year = year,
-      crsp_fundno = crsp_fundno,
-      predicted_alpha = as.numeric(pred_enet)
+  transmute(
+    evaluation_year = year,
+    crsp_fundno = crsp_fundno,
+    predicted_alpha = as.numeric(pred_enet)
+  )
+
+  result <- result %>%
+    mutate(
+      alpha = best_alpha,
+      lambda = best_lambda,
+      mse = best_mse
     )
 
-  param_df <- tibble(
-    evaluation_year = evaluation_year,
-    alpha = best_alpha,
-    lambda = best_lambda,
-    mse = best_mse
-    )
-
-  return(list(
-    predictions = result,
-    params = param_df
-    ))
+  return(result)
 }
 ```
 
 ## feature importance for enet
 ```{r}
 run_enet_expanding <- function(df,
-                               test_start_year = 2020,
+                               test_start_year = 2025,
                                test_end_year = 2025){
 
   df <- df %>%
@@ -287,49 +284,23 @@ run_enet_expanding <- function(df,
     select(-alpha_ann, -crsp_fundno, -caldt, -year) %>%
     colnames()
 
-  all_predictions_list <- list()
-  all_param_list <- list()
+  # 🔥 SINGLE TRAIN (2004–2025 input, function handles split)
+  train_df <- df %>%
+    filter(year <= test_end_year)
 
-  for (yr in test_start_year:test_end_year){
+  model_output <- predict_alpha_enet(train_df)
 
-    cat("Processing year:", yr, "\n")
-
-    train_df <- df %>%
-      filter(year <= yr)
-
-    if (nrow(train_df) == 0){
-      warning(paste("No data for year", yr))
-      next
-    }
-
-    # STANDARDISE (NO LEAKAGE)
-    X_raw <- train_df %>% select(all_of(feature_names))
-
-    mu <- colMeans(X_raw)
-    sigma <- apply(X_raw, 2, sd)
-    sigma[sigma == 0] <- 1
-
-    X_scaled <- sweep(X_raw, 2, mu, "-") %>%
-      sweep(2, sigma, "/") %>%
-      as.data.frame()
-
-    train_scaled <- train_df
-    train_scaled[feature_names] <- X_scaled
-
-
-    # RUN MODEL
-    model_output <- predict_alpha_enet(train_scaled)
-
-    if (is.null(model_output)) next
-
-    all_predictions_list[[as.character(yr)]] <- model_output$predictions
-    all_param_list[[as.character(yr)]] <- model_output$params
+  if (is.null(model_output)) {
+    return(NULL)
   }
 
-  all_predictions <- bind_rows(all_predictions_list) %>%
+  # 🔑 since predict_alpha_enet now returns tibble
+  all_predictions <- model_output %>%
     arrange(evaluation_year, crsp_fundno)
 
-  all_params <- bind_rows(all_param_list) %>%
+  # extract params from columns (minimal change)
+  all_params <- model_output %>%
+    distinct(evaluation_year, alpha, lambda, mse) %>%
     arrange(evaluation_year)
 
   return(list(
@@ -356,15 +327,13 @@ train_final <- df %>% filter(year <= 2024)
 # =========================
 # STANDARDISE FINAL MODEL
 # =========================
-X_raw <- train_final %>% select(all_of(feature_names))
+#X_raw <- train_final %>% select(all_of(feature_names))
 
-mu <- colMeans(X_raw)
-sigma <- apply(X_raw, 2, sd)
-sigma[sigma == 0] <- 1
+#mu <- colMeans(X_raw)
+#sigma <- apply(X_raw, 2, sd)
+#sigma[sigma == 0] <- 1
 
-X_final <- sweep(X_raw, 2, mu, "-") %>%
-  sweep(2, sigma, "/") %>%
-  as.matrix()
+X_final <- train_final %>% select(all_of(feature_names))
 y_final <- train_final$alpha_ann
 
 final_model <- glmnet(
@@ -412,7 +381,7 @@ enet_featimp_ranking <-
 
 enet_featimp_ranking
 
-ggsave("../figures/variable_importance_SHAP_enet.png", width = 16, height = 12)
+ggsave("../figures/enet_shap_plot.png", width = 16, height = 12)
 ```
 
 
