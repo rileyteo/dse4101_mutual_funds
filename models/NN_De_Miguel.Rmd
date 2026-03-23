@@ -191,10 +191,9 @@ shap_contributions_matrix <- h2o.predict_contributions(
   background_frame = h2o.getFrame("LOCKED_BACK_SAMPLE")
 )
 
-# Move results back to R memory
 shap_df <- as.data.frame(shap_contributions_matrix)
 
-# 5. GENERATE THE PLOT (Matching RNN Aesthetics)
+# Generate plot
 imp_df_nn <- shap_df %>%
   select(-BiasTerm) %>% 
   summarise(across(everything(), ~mean(abs(.)))) %>%
@@ -213,10 +212,7 @@ nn_shap_ranking_plot <- ggplot(imp_df_nn,
   theme_minimal() +
   scale_x_continuous(expand = expansion(mult = c(0, .15)))
 
-# 6. DISPLAY AND SAVE
 print(nn_shap_ranking_plot)
-
-if (!dir.exists("../figures")) dir.create("../figures", recursive = TRUE)
 ggsave("../figures/nn_shap_plot.png", plot = nn_shap_ranking_plot, width = 9, height = 7, dpi = 300)
 
 
