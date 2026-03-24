@@ -20,7 +20,6 @@ library(tensorflow)
 library(reticulate)
 library(rBayesianOptimization)
 library(fastshap)
-library(tidyverse)
 
 df <- read_csv('../data/final_data.csv')
 ```
@@ -234,17 +233,17 @@ n_feats <- length(feature_names)
 
 
 best_config <- list(
-  lr          = 0.00925,      # 1. Learning Rate
-  n_layers    = 2L,           # 2. Hidden Layers (L for integer)
-  units       = 86L,         # 3. Units per Layer
-  dr_in       = 0.01,         # 4. Dropout (Input)
-  dr_hid      = 0.24,         # 5. Dropout (Hidden)
+  lr          = 0.00983,      # 1. Learning Rate
+  n_layers    = 2L,           # 2. Hidden Layers 
+  units       = 81L,         # 3. Units per Layer
+  dr_in       = 0.07,         # 4. Dropout (Input)
+  dr_hid      = 0.33,         # 5. Dropout (Hidden)
   batch_size  = 32L,          # 6. Mini-Batch Size
   use_bn      = FALSE,        # 7. Batch Norm
   bn_pos      = "after",     # 8. BN Position
   activation  = "tanh",       # 9. Activation
-  wd          = 0.000304,     # 10. Weight Decay
-  epochs      = 37L           # 11. Epochs
+  wd          = 0.0003894,     # 10. Weight Decay
+  epochs      = 46L           # 11. Epochs
 )
 
 
@@ -253,14 +252,9 @@ train_final <- df_for_shap_analysis %>% filter(year(caldt) <= 2024)
 X_final_raw <- as.matrix(train_final[, feature_names])
 y_final     <- train_final$alpha_ann
 
-# Re-scale based on the final training set
-scaler_final   <- preProcess(X_final_raw, method = c("center", "scale"))
-X_final_scaled <- predict(scaler_final, X_final_raw)
-
-X_final_3d <- array(X_final_scaled, dim = c(nrow(X_final_scaled), 1, length(feature_names)))
+X_final_3d <- array(X_final_raw, dim = c(nrow(X_final_raw), 1, length(feature_names)))
 
 # Fit model
-
 final_rnn_model <- build_custom_lstm(best_config) 
 final_rnn_model %>% fit(
   X_final_3d, y_final,
@@ -270,8 +264,8 @@ final_rnn_model %>% fit(
 )
 
 set.seed(4101)
-sample_idx <- sample(seq_len(nrow(X_final_scaled)), size = 1500)
-X_sample <- as.data.frame(X_final_scaled[sample_idx, ])
+sample_idx <- sample(seq_len(nrow(X_final_raw)), size = 1500)
+X_sample <- as.data.frame(X_final_raw[sample_idx, ])
 
 rnn_shap_wrapper <- function(object, newdata) {
   arr <- array(as.matrix(newdata), dim = c(nrow(newdata), 1, ncol(newdata)))
