@@ -29,46 +29,11 @@ library(readxl)
 library(urca)
 library(ggplot2)
 library(corrplot)
-library(randomForest)
-library(xgboost)
 library(lmtest)
 library(sandwich)
 library(caret)
-library(rBayesianOptimization)
-library(lubridate)
-library(keras3)
-library(tensorflow)
-library(reticulate)
-library(conflicted)
-library(h2o)
 
-```
 
-```{r}
-# Set preferences
-conflicts_prefer(lubridate::year)
-conflicts_prefer(lubridate::month)
-conflicts_prefer(lubridate::as_date)
-
-conflicts_prefer(dplyr::filter)
-conflicts_prefer(dplyr::select)
-conflicts_prefer(dplyr::mutate)
-conflicts_prefer(dplyr::lag) 
-
-conflicts_prefer(base::as.numeric)
-conflicts_prefer(base::as.vector)
-conflicts_prefer(base::round)
-conflicts_prefer(base::is.numeric)
-conflicts_prefer(base::`&&`)
-```
-
-```{r}
-# Initialise h2o
-tryCatch({
-  h2o.init(nthreads = 1, max_mem_size = "4G")
-}, error = function(e) {
-  message("H2O is already running.")
-})
 ```
 
 THIINGS TO DO BEFORE U CLICK RUN ALL
@@ -435,7 +400,7 @@ construct_long_only_fund_portfolio <- function(df,
       
       # December sell fee on surviving invested positions only
       total_equity_after_sell_fee <- total_equity_before_sell_fee
-      if (month(as_date(dt))) {
+      if (month(as_date(dt)) == 12) {
         invested_mask <- positions$alive
         invested_value_dec <- sum(positions$value[invested_mask], na.rm = TRUE)
         
