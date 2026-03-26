@@ -840,6 +840,7 @@ compute_metrics <- function(df, equity_col, return_col, rexcess_col, fit_obj, nw
   
   nw_test <- coeftest(fit_obj, vcov. = nw_obj)
   alpha_est <- nw_test["(Intercept)", "Estimate"]
+  alpha_se  <- nw_test["(Intercept)", "Std. Error"]
   alpha_pval <- nw_test["(Intercept)", "Pr(>|t|)"]
   
   data.frame(
@@ -848,6 +849,7 @@ compute_metrics <- function(df, equity_col, return_col, rexcess_col, fit_obj, nw
     Max_Drawdown = round(maxdd, 4),
     Annualised_Sharpe_Ratio = round(sharpe, 3),
     Alpha_Intercept_Annualised = round(alpha_est * 12, 4),
+    Alpha_SE_Annualised = round(alpha_se * 12, 4),
     Alpha_p_value = round(alpha_pval, 4),
     Beats_Benchmark_5pct = as.integer(alpha_est > 0 & alpha_pval < 0.05),
     Beats_Benchmark_10pct = as.integer(alpha_est > 0 & alpha_pval < 0.10)
@@ -915,6 +917,7 @@ metrics_qqq <- data.frame(
   Max_Drawdown = round(maxdd_qqq, 4),
   Annualised_Sharpe_Ratio = round(sharpe_qqq, 3),
   Alpha_Intercept_Annualised = NA,
+  Alpha_SE_Annualised = NA,
   Alpha_p_value = NA,
   Beats_Benchmark_5pct = NA,
   Beats_Benchmark_10pct = NA
