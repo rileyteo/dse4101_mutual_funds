@@ -162,7 +162,8 @@ predict_alpha_boost <- function(df, target = "alpha_ann") {
       max_depth = c(3, 6, 9),
       subsample = c(0.6, 0.8),  
       colsample_bytree = c(0.6, 0.8), 
-      min_child_weight = c(1, 5, 10)
+      min_child_weight = c(1, 5, 10),
+      nrounds = c(50, 100, 200)
   )
   grid$mse <- sapply(seq_len(nrow(grid)), function(i) {
     m <- xgb.train(
@@ -177,7 +178,7 @@ predict_alpha_boost <- function(df, target = "alpha_ann") {
         seed = 42
       ),
       data = dtrain,
-      nrounds = 100,
+      nrounds = as.integer(grid$nrounds[i]),
       verbose = 0
     )
     preds <- predict(m, dval)
@@ -190,7 +191,7 @@ predict_alpha_boost <- function(df, target = "alpha_ann") {
   
   model <- xgb.train(
     data = dtrain,
-    nrounds = 100,
+    nrounds = as.integer(best$nrounds),
     verbose = 0,
     params = list (
     gamma = as.numeric(best$gamma),
@@ -207,8 +208,8 @@ predict_alpha_boost <- function(df, target = "alpha_ann") {
   preds <- predict(model, dtest)
   mse <- mean((test[[target]] - preds)^2)
   #print best parameters for feature importance function
-  cat(sprintf("XGBoost Year %d: best gamma=%.1f, eta=%.2f, max_depth=%d, subsample=%.2f, colsample_bytree=%.2f, min_child_weight=%d | MSE:%.4f\n", 
-              pred_year, best$gamma, best$eta, best$max_depth,best$subsample, best$colsample_bytree, best$min_child_weight, mse))
+  cat(sprintf("XGBoost Year %d: best gamma=%.1f, eta=%.2f, max_depth=%d, subsample=%.2f, colsample_bytree=%.2f, min_child_weight=%d, nrounds =%d| MSE:%.4f\n", 
+              pred_year, best$gamma, best$eta, best$max_depth,best$subsample, best$colsample_bytree, best$min_child_weight,best$nrounds, mse))
   
   results <- data.frame(
     evaluation_year = pred_year,
