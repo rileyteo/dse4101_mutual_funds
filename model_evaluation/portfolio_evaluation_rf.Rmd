@@ -158,7 +158,7 @@ predict_alpha_rf <- function(df, target = "alpha_ann") {
   grid <- expand.grid(
     ntree = c(200, 500, 1000),
     mtry  = c(floor(sqrt(n_feats)), floor(n_feats/3), floor(n_feats/2)),
-    nodesize = c(1, 5, 10)
+    nodesize = c(5, 10)
   )
 
   grid$mse <- sapply(seq_len(nrow(grid)), function(i) {

@@ -47,7 +47,7 @@ predict_alpha_rf <- function(df, target = "alpha_ann") {
   grid <- expand.grid(
     ntree = c(200, 500, 1000),
     mtry  = c(floor(sqrt(n_feats)), floor(n_feats/3), floor(n_feats/2)),
-    nodesize = c(1, 5, 10)
+    nodesize = c(5, 10)
   )
 
   grid$mse <- sapply(seq_len(nrow(grid)), function(i) {
@@ -220,9 +220,9 @@ RF_feat_importance <- function(df, target = "alpha_ann", sample_size = 1500) {
   RF_FI_model <- randomForest(
     x = train_data[, features],
     y = train_data[[target]],
-    ntree = 200,            # SUBSTITUTE BEST PARAMS OF LAST WINDOW DURING TRAINING 
+    ntree = 500,            # SUBSTITUTE BEST PARAMS OF LAST WINDOW DURING TRAINING 
     mtry = floor(n_feats/3),# TO ENSURE EVALUATION IS CONDUCTED ON A MODEL 
-    nodesize = 1,          # SIMILAR TO THE FINAL ONE BY PREDICT_ALPHA_...FUNCTION
+    nodesize = 10,          # SIMILAR TO THE FINAL ONE BY PREDICT_ALPHA_...FUNCTION
     importance = TRUE
   )
   
@@ -400,6 +400,7 @@ duplicates_boost <- boost_df %>%
 
 head(duplicates_boost)
 ```
+
 
 
 
