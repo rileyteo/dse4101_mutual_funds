@@ -1,0 +1,221 @@
+---
+title: "NN De Miguel"
+author: "Yun Tsing"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(h2o)
+library(caret)
+
+df <- read_csv('../data/final_data.csv')
+```
+
+```{r}
+# Initialise h2o
+tryCatch({
+  h2o.init(nthreads = 1, max_mem_size = "4G")
+}, error = function(e) {
+  message("H2O is already running.")
+})
+```
+
+```{r}
+predict_alpha_nn_h2o <- function(df, target = "alpha_ann") {
+  
+  start_time <- Sys.time()
+  df$caldt <- lubridate::as_date(df$caldt)
+  features <- setdiff(names(df), c("crsp_fundno", "caldt", "alpha_ann"))
+  
+  all_years <- lubridate::year(df$caldt)
+  pred_year <- max(all_years)
+  
+  # Data splitting
+  train_full <- df[all_years < pred_year, ]
+  test       <- df[all_years == pred_year, ]
+  
+  train_years_list <- sort(unique(lubridate::year(train_full$caldt)))
+  cutoff           <- train_years_list[floor(length(train_years_list) * 0.7)]
+  
+  tune_train_df <- train_full[lubridate::year(train_full$caldt) <= cutoff, ]
+  tune_val_df   <- train_full[lubridate::year(train_full$caldt) >  cutoff, ]
+  
+  train_h2o      <- h2o::as.h2o(tune_train_df)
+  val_h2o        <- h2o::as.h2o(tune_val_df)
+  test_h2o       <- h2o::as.h2o(test)
+  full_train_h2o <- h2o::as.h2o(train_full) 
+  
+  # Grid search
+  hyper_params <- list(
+    hidden = list(c(32), c(32, 16), c(32, 16, 8)), 
+    l1 = c(1e-4, 1e-3),
+    l2 = c(1e-4, 1e-3),
+    input_dropout_ratio = c(0.0, 0.05, 0.1), 
+    hidden_dropout_ratios = list(
+    # Options for 1-layer (32)
+    c(0.2), c(0.4), c(0.5),
+    # Options for 2-layers (32, 16)
+    c(0.2, 0.2), c(0.3, 0.2), c(0.5, 0.5),
+    # Options for 3-layers (32, 16, 8)
+    c(0.2, 0.2, 0.2), c(0.3, 0.2, 0.1), c(0.4, 0.4, 0.4)
+  )
+  )
+  
+  grid <- h2o::h2o.grid(
+    algorithm = "deeplearning",
+    grid_id = paste0("nn_grid_", pred_year),
+    x = features,
+    y = target,
+    training_frame = train_h2o,
+    validation_frame = val_h2o,       
+    seed = 4101,
+    reproducible = TRUE,
+    hyper_params = hyper_params,
+    activation = "TanhWithDropout",  
+    epochs = 50,          
+    stopping_rounds = 10, 
+    standardize = TRUE,
+    adaptive_rate = TRUE,
+    stopping_metric = "MSE"
+  
+  )
+  
+  # Identify best model
+  grid_results <- h2o::h2o.getGrid(grid@grid_id, sort_by = "mse", decreasing = FALSE)
+  best_model <- h2o::h2o.getModel(grid_results@model_ids[[1]])
+  cat("\n==============================================\n")
+  cat(sprintf("Best Hyperparameters for Year %d:\n", pred_year))
+  cat(sprintf("  - Hidden Layers:  %s\n", paste(best_model@parameters$hidden, collapse = ", ")))
+  cat(sprintf("  - L1 Reg:         %e\n", best_model@parameters$l1))
+  cat(sprintf("  - L2 Reg:         %e\n", best_model@parameters$l2))
+  cat(sprintf("  - Input Dropout:  %.2f\n", best_model@parameters$input_dropout_ratio))
+  cat(sprintf("  - Hidden Dropout:  %.2f\n", best_model@parameters$hidden_dropout_ratios))
+  cat(sprintf("  - MSE: %.6f\n", as.numeric(grid_results@summary_table$mse[1])))
+  cat("==============================================\n")
+  
+  seeds <- c(4101, 4102, 4103, 4104, 4105)
+  ensemble_preds <- matrix(0, nrow = nrow(test), ncol = length(seeds))
+  
+  for(i in 1:length(seeds)) {
+    cat(sprintf("\nSeed %d for Year %d \n", i, pred_year))
+    
+    m_final <- h2o::h2o.deeplearning(
+      x = features, y = target,
+      training_frame = full_train_h2o,
+      hidden = best_model@parameters$hidden, 
+      l1 = best_model@parameters$l1,
+      l2 = best_model@parameters$l2,
+      input_dropout_ratio = best_model@parameters$input_dropout_ratio,
+      hidden_dropout_ratios = best_model@parameters$hidden_dropout_ratios, 
+      epochs = 50,
+      activation = "TanhWithDropout",
+      standardize = TRUE,
+      adaptive_rate = TRUE,
+      seed = seeds[i],
+      reproducible = TRUE
+    )
+    
+    p <- h2o::h2o.predict(m_final, test_h2o)
+    ensemble_preds[, i] <- as.numeric(as.vector(p$predict))
+    h2o::h2o.rm(m_final) 
+  }
+  
+  res_preds <- data.frame(
+    evaluation_year = pred_year,
+    crsp_fundno = test$crsp_fundno,
+    predicted_alpha = rowMeans(ensemble_preds) 
+  )
+  
+  
+  # Cleanup H2O memory
+  h2o::h2o.rm(train_h2o); h2o::h2o.rm(val_h2o); h2o::h2o.rm(test_h2o); h2o::h2o.rm(full_train_h2o)
+  duration <- round(difftime(Sys.time(), start_time, units = "mins"), 2)
+  message(paste("Year", pred_year, "complete in", duration, "minutes"))
+  
+  return(res_preds)
+}
+```
+
+```{r}
+result = predict_alpha_nn_h2o(df)
+```
+
+
+
+```{r}
+df_for_shap_analysis = read_csv('../data/df_for_shap_analysis.csv')
+
+final_train_df <- df_for_shap_analysis %>% filter(lubridate::year(caldt) <= 2024)
+feature_names  <- setdiff(names(final_train_df), c("crsp_fundno", "caldt", "alpha_ann", "year"))
+
+h2o.removeAll() 
+final_h2o_data <- as.h2o(final_train_df, destination_frame = "FINAL_NN_DATA")
+
+final_h2o_model <- h2o.deeplearning(
+  x = feature_names,
+  y = "alpha_ann",
+  training_frame = "FINAL_NN_DATA",
+  model_id = "BEST_NN_MODEL",
+  hidden              = c(32, 16),           
+  l1                  = 1e-3,                  
+  l2                  = 1e-4,                  
+  input_dropout_ratio = 0.1,
+  hidden_dropout_ratios = c(0.3, 0.2),
+  activation     = "TanhWithDropout",          
+  epochs         = 50,                         
+  standardize    = TRUE,                       
+  adaptive_rate  = TRUE,                       
+  seed           = 4101,                       
+  reproducible   = TRUE                        
+)
+
+set.seed(4101)
+all_rows_count <- nrow(h2o.getFrame("FINAL_NN_DATA"))
+
+# Generate the indices
+shap_rows_sorted       <- sort(sample(1:all_rows_count, 1500))
+background_rows_sorted <- sort(sample(1:all_rows_count, 100))
+
+h2o.assign(h2o.getFrame("FINAL_NN_DATA")[shap_rows_sorted, ], "LOCKED_SHAP_SAMPLE")
+h2o.assign(h2o.getFrame("FINAL_NN_DATA")[background_rows_sorted, ], "LOCKED_BACK_SAMPLE")
+
+
+shap_contributions_matrix <- h2o.predict_contributions(
+  object = final_h2o_model,
+  newdata = h2o.getFrame("LOCKED_SHAP_SAMPLE"),
+  background_frame = h2o.getFrame("LOCKED_BACK_SAMPLE")
+)
+
+shap_df <- as.data.frame(shap_contributions_matrix)
+
+# Generate plot
+imp_df_nn <- shap_df %>%
+  select(-BiasTerm) %>% 
+  summarise(across(everything(), ~mean(abs(.)))) %>%
+  pivot_longer(everything(), names_to = "feature", values_to = "value") %>%
+  arrange(desc(value)) %>%
+  slice_head(n = 20)
+
+nn_shap_ranking_plot <- ggplot(imp_df_nn, 
+       aes(y = reorder(feature, value), x = value, fill = value)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = round(value, 5)), 
+            nudge_x = max(imp_df_nn$value) * 0.05, 
+            size = 3.5) +
+  scale_fill_gradient(low = "firebrick", high = "dodgerblue4") +
+  labs(title = "Neural Network SHAP Ranking") +
+  theme_minimal() +
+  scale_x_continuous(expand = expansion(mult = c(0, .15)))
+
+print(nn_shap_ranking_plot)
+ggsave("../figures/nn_shap_plot.png", plot = nn_shap_ranking_plot, width = 9, height = 7, dpi = 300)
+
+
+```
