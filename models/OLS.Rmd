@@ -1,0 +1,194 @@
+---
+title: "OLS and Elastic Net"
+author: "Erica"
+date: "2026-03-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+```   
+
+
+```{r}
+#load library
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(glmnet)
+library(ggplot2)
+library(lmtest)
+```
+
+
+```{r}
+#read in data
+file_path = "../data/df_for_shap_analysis.csv"
+df = read.csv(file_path) 
+```
+
+## ols function to be copied to replace the code block in eval
+```{r}
+predict_alpha_ols <- function(train_df){
+  df <- train_df %>%
+    mutate(
+      caldt = as.Date(caldt),
+      year = year(caldt)
+    ) %>%
+    arrange(year, crsp_fundno) %>%
+    drop_na()
+
+  evaluation_year <- max(df$year)
+
+  train_data <- df %>%
+    filter(year < evaluation_year)
+
+  test_data <- df %>%
+    filter(year == evaluation_year)
+
+  feature_names <- train_data %>%
+    select(-alpha_ann, -crsp_fundno, -caldt, -year) %>%
+    colnames()
+
+  formula <- as.formula(
+    paste("alpha_ann ~", paste(feature_names, collapse = " + "))
+  )
+
+  model <- lm(formula, data = train_data) # no hyperparameter tuning is needed for OLS
+
+  preds <- predict(model, newdata = test_data)
+
+  result <- tibble(
+    evaluation_year = evaluation_year,
+    crsp_fundno = test_data$crsp_fundno,
+    predicted_alpha = preds
+  )
+
+  return(result)
+}
+```
+
+## feature importance of OLS
+```{r}
+# preprocess
+df <- df %>%
+  mutate(
+    caldt = as.Date(caldt),
+    year = lubridate::year(caldt)
+  ) %>%
+  arrange(year, crsp_fundno) %>%
+  drop_na()
+
+# train-test split
+train_df <- df %>% filter(year <= 2024, year >= 2004)
+
+predict_alpha_ols_with_model <- function(train_df){
+  
+  df <- train_df %>%
+    mutate(
+      caldt = as.Date(caldt),
+      year = lubridate::year(caldt)
+    ) %>%
+    arrange(year, crsp_fundno) %>%
+    drop_na()
+
+  evaluation_year <- max(df$year)
+
+  train_data <- df %>% filter(year < evaluation_year)
+
+  feature_names <- train_data %>%
+    select(-alpha_ann, -crsp_fundno, -caldt, -year) %>%
+    colnames()
+
+  formula <- as.formula(
+    paste("alpha_ann ~", paste(feature_names, collapse = " + "))
+  )
+
+  model <- lm(formula, data = train_data)
+
+  return(list(
+    model = model,
+    train_data = train_data,
+    feature_names = feature_names
+  ))
+}
+
+ols_output <- predict_alpha_ols_with_model(train_df)
+
+model <- ols_output$model
+train_data <- ols_output$train_data
+feature_names <- ols_output$feature_names
+
+X_train <- train_data %>% 
+  select(all_of(feature_names)) %>% 
+  as.matrix()
+
+# ---------------------------
+# SHAP
+# ---------------------------
+
+coefs <- coef(model)[-1]
+
+# ensure alignment
+coefs <- coefs[colnames(X_train)]
+
+mu <- colMeans(X_train)
+
+# SHAP = beta * (x - mean)
+shap_values <- sweep(X_train, 2, mu, "-") %>%
+  sweep(2, coefs, "*") %>%
+  as.data.frame()
+
+# feature importance
+abs_shap <- abs(shap_values)
+abs_shap_mean <- colMeans(abs_shap) %>%
+  sort(decreasing = TRUE)
+
+importance_df <- tibble(
+  feature = names(abs_shap_mean),
+  importance = abs_shap_mean
+)
+
+# plot
+ols_featimp_ranking <- 
+  ggplot(importance_df, 
+         aes(y = reorder(feature, importance),
+             x = importance,
+             fill = importance)) +
+  geom_col(show.legend = FALSE) +
+  scale_fill_gradient(low = "firebrick", high = "dodgerblue4") +
+  labs(
+    title = "OLS SHAP Ranking",
+    y = "",
+    x = "Mean (|SHAP|)"
+  ) +
+  theme_minimal()
+
+ols_featimp_ranking
+
+ggsave("../figures/ols_shap_plot.png", width = 16, height = 12)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
