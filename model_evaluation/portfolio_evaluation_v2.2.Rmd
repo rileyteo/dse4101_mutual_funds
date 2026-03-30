@@ -72,7 +72,8 @@ build_top_decile_history <- function(model_fn,
     # Expanding window:
     # forecast for most recent year
     train_cutoff <- as.Date(paste0(yr, "-12-31"))
-    
+
+    #this is not data leakage as the models will slice the most recent year as evaluation year in their implementation
     train_df <- df %>%
       filter(.data[[date_col]] <= train_cutoff)
     
