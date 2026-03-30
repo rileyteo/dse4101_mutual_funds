@@ -80,8 +80,7 @@ predict_alpha_nn_h2o <- function(df, target = "alpha_ann") {
     hyper_params = hyper_params,
     activation = "TanhWithDropout",  
     epochs = 50,          
-    stopping_rounds = 10, 
-    standardize = TRUE,
+    stopping_rounds = 10,
     adaptive_rate = TRUE,
     stopping_metric = "MSE"
   
@@ -116,7 +115,6 @@ predict_alpha_nn_h2o <- function(df, target = "alpha_ann") {
       hidden_dropout_ratios = best_model@parameters$hidden_dropout_ratios, 
       epochs = 50,
       activation = "TanhWithDropout",
-      standardize = TRUE,
       adaptive_rate = TRUE,
       seed = seeds[i],
       reproducible = TRUE
@@ -169,8 +167,7 @@ final_h2o_model <- h2o.deeplearning(
   input_dropout_ratio = 0.1,
   hidden_dropout_ratios = c(0.3, 0.2),
   activation     = "TanhWithDropout",          
-  epochs         = 50,                         
-  standardize    = TRUE,                       
+  epochs         = 50,                       
   adaptive_rate  = TRUE,                       
   seed           = 4101,                       
   reproducible   = TRUE                        
