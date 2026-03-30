@@ -223,7 +223,6 @@ predict_alpha_nn_h2o <- function(df, target = "alpha_ann") {
     activation = "TanhWithDropout",  
     epochs = 50,          
     stopping_rounds = 10, 
-    standardize = TRUE,
     adaptive_rate = TRUE,
     stopping_metric = "MSE"
   
@@ -259,7 +258,6 @@ predict_alpha_nn_h2o <- function(df, target = "alpha_ann") {
       hidden_dropout_ratios = best_model@parameters$hidden_dropout_ratios, 
       epochs = 50,
       activation = "TanhWithDropout",
-      standardize = TRUE,
       adaptive_rate = TRUE,
       seed = seeds[i],
       reproducible = TRUE
