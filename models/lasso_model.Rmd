@@ -1,0 +1,492 @@
+---
+title: "lasso_model"
+author: "Kellianne Ng"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load library
+```{r}
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(hdm)
+library(ggrepel)
+library(ggplot2)
+```
+
+## Load dataset
+```{r}
+df = read.csv("../data/final_data.csv")
+df = df %>% mutate(caldt = ymd(caldt))
+```
+
+```{r}
+fit_lasso_model <- function(full_df,
+                            target_col = "alpha_ann",
+                            fund_col = "crsp_fundno",
+                            date_col = "caldt",
+                            year_col = "evaluation_year") {
+  
+  # 1. Basic checks
+  required_cols <- c(target_col, fund_col, date_col)
+  missing_cols <- setdiff(required_cols, names(full_df))
+  
+  if (length(missing_cols) > 0) {
+    stop(paste("Missing required columns:", paste(missing_cols, collapse = ", ")))
+  }
+  
+  # 2. create evaluation_year
+  df <- full_df %>%
+    mutate(
+      !!date_col := ymd(.data[[date_col]]),
+      !!year_col := as.integer(format(.data[[date_col]], "%Y"))
+    )
+  
+  pred_year = max(df[[year_col]], na.rm = TRUE)
+  
+  # 3. Identify original numeric predictors
+  exclude_base <- c(target_col, fund_col, date_col, year_col)
+  
+  original_predictor_cols <- setdiff(names(df), exclude_base)
+  original_predictor_cols <- original_predictor_cols[sapply(df[original_predictor_cols], is.numeric)]
+  
+  if (length(original_predictor_cols) == 0) {
+    stop("No numeric predictor columns found.")
+  }
+  
+  # 4. Create squared terms from original predictors only
+  for (col in original_predictor_cols) {
+    df[[paste0(col, "_sq")]] <- df[[col]]^2
+  }
+  
+  # 5. Create pairwise interaction terms from original non-squared predictors only
+  if (length(original_predictor_cols) >= 2) {
+    interaction_pairs <- combn(original_predictor_cols, 2, simplify = FALSE)
+    
+    for (pair in interaction_pairs) {
+      col1 <- pair[1]
+      col2 <- pair[2]
+      new_name <- paste0(col1, "_x_", col2)
+      df[[new_name]] <- df[[col1]] * df[[col2]]
+    }
+  }
+  # 6. Split into training and prediction sets
+  train_df <- df %>%
+    filter(.data[[year_col]] < pred_year) %>%
+    filter(!is.na(.data[[target_col]])) %>%
+    arrange(.data[[date_col]])
+  
+  test_df <- df %>%
+    filter(.data[[year_col]] == pred_year) %>%
+    arrange(.data[[date_col]])
+
+  # 7. Select predictor columns
+  exclude_from_model <- c(target_col, fund_col, date_col, year_col)
+  
+  predictor_cols <- setdiff(names(train_df), exclude_from_model)
+  predictor_cols <- predictor_cols[sapply(train_df[predictor_cols], is.numeric)]
+  
+  if (length(predictor_cols) == 0) {
+    stop("No numeric predictor columns found.")
+  }
+  
+  # 8. Build training and test matrices
+  x_train <- train_df %>%
+    select(all_of(predictor_cols)) %>%
+    mutate(across(everything(), as.numeric))
+  
+  x_test <- test_df %>%
+    select(all_of(predictor_cols)) %>%
+    mutate(across(everything(), as.numeric))
+  
+  y_train <- train_df[[target_col]]
+  
+  # 9. Fit plug-in Lasso
+  lasso_fit <- rlasso(
+    x = as.matrix(x_train),
+    y = y_train,
+    post = FALSE
+  )
+  
+  # 10. Predict for all funds in prediction_year
+  predicted_alpha <- as.numeric(
+    predict(lasso_fit, newdata = as.matrix(x_test))
+  )
+  
+  # 11. Return required output
+  pred_df <- test_df %>%
+    transmute(
+      evaluation_year = .data[[year_col]],
+      crsp_fundno = .data[[fund_col]],
+      predicted_alpha = predicted_alpha
+    ) %>%
+    arrange(desc(predicted_alpha))
+  
+  return(pred_df)
+}
+```
+
+# Coefficient & Sparsity Analysis for Lasso 
+# Read df
+```{r}
+df <- read.csv("../data/df_for_shap_analysis.csv")
+head(df,3)
+```
+## Coefficient analysis for Lasso: 
+This function for each forecast year 202-2025, 
+takes up all the data up to that point
+creates evaluation year
+creates squared terms and interaction
+fits plug in lambda
+fits plug in lasso 
+extracts the coefficient vector
+stores which variables were selected 
+
+Data frame returned:
+- returning a dataframe that summarises
+1. how many times each variable was selected
+2. average absolute coefficient
+3. whether squared terms were picked
+4. plot the coefficient paths over time 
+```{r}
+run_lasso_coefficient_analysis <- function(full_df,
+                                           start_year = 2020,
+                                           end_year = 2025,
+                                           target_col = "alpha_ann",
+                                           fund_col = "crsp_fundno",
+                                           date_col = "caldt",
+                                           year_col = "evaluation_year") {
+  
+  required_cols <- c(target_col, fund_col, date_col)
+  missing_cols <- setdiff(required_cols, names(full_df))
+  
+  if (length(missing_cols) > 0) {
+    stop(paste("Missing required columns:", paste(missing_cols, collapse = ", ")))
+  }
+  
+  # 1. Create evaluation_year
+  df <- full_df %>%
+mutate(
+!!date_col := dmy(.data[[date_col]]),
+!!year_col := as.integer(format(.data[[date_col]], "%Y"))
+)
+  
+  # 2. Identify original numeric predictors
+  exclude_base <- c(target_col, fund_col, date_col, year_col)
+  
+  original_predictor_cols <- setdiff(names(df), exclude_base)
+  original_predictor_cols <- original_predictor_cols[sapply(df[original_predictor_cols], is.numeric)]
+  
+  if (length(original_predictor_cols) == 0) {
+    stop("No numeric predictor columns found.")
+  }
+  
+  # 3. Create squared terms from original predictors only
+  for (col in original_predictor_cols) {
+    df[[paste0(col, "_sq")]] <- df[[col]]^2
+  }
+  
+  # 4. Create interaction terms from original non-squared predictors only
+  if (length(original_predictor_cols) >= 2) {
+    interaction_pairs <- combn(original_predictor_cols, 2, simplify = FALSE)
+    
+    for (pair in interaction_pairs) {
+      col1 <- pair[1]
+      col2 <- pair[2]
+      new_name <- paste0(col1, "_x_", col2)
+      df[[new_name]] <- df[[col1]] * df[[col2]]
+    }
+  }
+  
+  coef_results <- list()
+  
+  # 5. Recursive yearly estimation
+  for (pred_year in start_year:end_year) {
+    
+    train_df <- df %>%
+      filter(.data[[year_col]] < pred_year) %>%
+      filter(!is.na(.data[[target_col]])) %>%
+      arrange(.data[[date_col]])
+    
+    if (nrow(train_df) == 0) next
+    
+    exclude_from_model <- c(target_col, fund_col, date_col, year_col)
+    
+    predictor_cols <- setdiff(names(train_df), exclude_from_model)
+    predictor_cols <- predictor_cols[sapply(train_df[predictor_cols], is.numeric)]
+    
+    if (length(predictor_cols) == 0) next
+    
+    x_train <- train_df %>%
+      select(all_of(predictor_cols)) %>%
+      mutate(across(everything(), as.numeric))
+    
+    y_train <- train_df[[target_col]]
+    
+    # Fit plug-in Lasso
+    lasso_fit <- rlasso(
+      x = as.matrix(x_train),
+      y = y_train,
+      post = FALSE
+    )
+    
+    # Extract full coefficient vector
+    coef_vec <- coef(lasso_fit)
+    
+    coef_df <- data.frame(
+      evaluation_year = pred_year,
+      variable = names(coef_vec),
+      coefficient = as.numeric(coef_vec),
+      stringsAsFactors = FALSE
+    ) %>%
+      filter(variable != "(Intercept)")
+    
+    coef_results[[as.character(pred_year)]] <- coef_df
+  }
+  
+  final_coef_df <- bind_rows(coef_results)
+  
+  return(final_coef_df)
+}
+```
+
+```{r}
+coef_df <- run_lasso_coefficient_analysis(
+  full_df = df,
+  start_year = 2020,
+  end_year = 2025,
+  target_col = "alpha_ann",
+  fund_col = "crsp_fundno",
+  date_col = "caldt",
+  year_col = "evaluation_year"
+)
+
+coef_df
+```
+
+## Selection summary 
+- how often each variable was selected
+- whether its the original, squared or interaction term 
+- average coefficient magnitude 
+```{r}
+selection_summary <- coef_df %>%
+  mutate(
+    selected = coefficient != 0,
+    term_type = case_when(
+      grepl("_x_", variable) ~ "interaction",
+      grepl("_sq$", variable) ~ "squared",
+      TRUE ~ "original"
+    )
+  ) %>%
+  group_by(variable, term_type) %>%
+  summarise(
+    times_selected = sum(selected),
+    mean_coefficient = mean(coefficient, na.rm = TRUE),
+    mean_abs_coefficient = mean(abs(coefficient), na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(times_selected), desc(mean_abs_coefficient))
+
+selection_summary
+```
+
+## Sparsity analysis 
+## Analysis of how sparse the Lasso model is 
+## Out of all candidate predictors, how many are selected each year? 
+## What is the proportion of predictors shrunk to zero? 
+```{r}
+sparsity_summary <- coef_df %>%
+  mutate(selected = coefficient != 0) %>%
+  group_by(evaluation_year) %>%
+  summarise(
+    total_predictors = n(),
+    selected_predictors = sum(selected),
+    zero_predictors = sum(!selected),
+    sparsity_rate = mean(!selected),
+    selection_rate = mean(selected),
+    .groups = "drop"
+  )
+
+sparsity_summary
+
+```
+## Sparsity analysis by type 
+## Which type of variables are often selected (squared, interaction terms, original variables)
+```{r}
+sparsity_by_type <- coef_df %>%
+  mutate(
+    selected = coefficient != 0,
+    term_type = case_when(
+      grepl("_x_", variable) ~ "interaction",
+      grepl("_sq$", variable) ~ "squared",
+      TRUE ~ "original"
+    )
+  ) %>%
+  group_by(evaluation_year, term_type) %>%
+  summarise(
+    total_terms = n(),
+    selected_terms = sum(selected),
+    selection_rate = mean(selected),
+    .groups = "drop"
+  )
+
+sparsity_by_type
+
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(scales)
+
+plot_df <- sparsity_by_type %>%
+  group_by(evaluation_year) %>%
+  mutate(
+    selected_share = selected_terms / sum(selected_terms),
+    label_share = paste0(round(selected_share * 100, 1), "%")
+  ) %>%
+  ungroup()
+
+ggplot(plot_df, aes(x = factor(evaluation_year), y = selected_terms, fill = term_type)) +
+  geom_col(position = "fill", width = 0.7) +
+  geom_text(
+    aes(label = label_share),
+    position = position_fill(vjust = 0.5),
+    size = 4,
+    color = "white"
+  ) +
+  scale_y_continuous(labels = percent_format()) +
+  labs(
+    title = "Share of Selected LASSO Predictors by Term Type",
+    x = "Forecast Year",
+    y = "Share of Selected Predictors",
+    fill = "Term Type"
+  ) +
+  theme_minimal()
+
+```
+
+
+## Plot coefficient paths
+```{r}
+plot_df <- coef_df %>%
+  group_by(variable) %>%
+  filter(any(coefficient != 0)) %>%
+  ungroup()
+
+label_df <- plot_df %>%
+  group_by(variable) %>%
+  slice_max(order_by = evaluation_year, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+ggplot(plot_df, aes(x = evaluation_year, y = coefficient, color = variable)) +
+  geom_line() +
+  geom_point(data = label_df, size = 1.2) +
+  geom_label_repel(
+    data = label_df,
+    aes(label = variable),
+    direction = "y",
+    label.size = 0.05,
+    min.segment.length = 0,
+    size = 3,
+    max.overlaps = 20
+  ) +
+  labs(
+    x = "Forecast Year",
+    y = "Coefficient",
+    title = "Lasso Coefficient Paths by Forecast Year"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+
+```
+
+## Code to find the top 8/10 variables that were selected the most often
+```{r}
+selection_summary <- coef_df %>%
+  mutate(
+    selected = coefficient != 0,
+    term_type = case_when(
+      grepl("_x_", variable) ~ "interaction",
+      grepl("_sq$", variable) ~ "squared",
+      TRUE ~ "original"
+    )
+  ) %>%
+  group_by(variable, term_type) %>%
+  summarise(
+    times_selected = sum(selected),
+    mean_abs_coefficient = mean(abs(coefficient), na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(times_selected), desc(mean_abs_coefficient))
+
+top_vars <- selection_summary %>%
+  slice_max(order_by = times_selected, n = 10) %>%
+  pull(variable)
+
+```
+
+## Plotting the top 8/ 10 coefficients 
+```{r}
+plot_df_top <- coef_df %>%
+  filter(variable %in% top_vars)
+
+label_df_top <- plot_df_top %>%
+  group_by(variable) %>%
+  slice_max(order_by = evaluation_year, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+ggplot(plot_df_top, aes(x = evaluation_year, y = coefficient, color = variable)) +
+  geom_line() +
+  geom_point(data = label_df_top, size = 1.2) +
+  geom_label_repel(
+    data = label_df_top,
+    aes(label = variable),
+    direction = "y",
+    label.size = 0.05,
+    min.segment.length = 0,
+    size = 3,
+    max.overlaps = 20
+  ) +
+  labs(
+    x = "Forecast Year",
+    y = "Coefficient",
+    title = "Top Selected Lasso Coefficients"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+```
+Sparsity plot
+
+```{r}
+
+library(ggplot2)
+library(scales)
+
+ggplot(sparsity_summary, aes(x = evaluation_year, y = sparsity_rate)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  geom_text(
+    aes(label = paste0(round(sparsity_rate * 100, 1), "%")),
+    vjust = -0.8,
+    size = 4
+  ) +
+  scale_y_continuous(
+    labels = percent_format(accuracy = 1),
+    limits = c(0.8, 1.0)
+  ) +
+  labs(
+    title = "LASSO Sparsity Rate by Forecast Year",
+    x = "Forecast Year",
+    y = "Sparsity Rate"
+  ) +
+  theme_minimal()
+```
+
