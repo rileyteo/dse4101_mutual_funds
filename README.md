@@ -54,8 +54,10 @@ results <- build_top_decile_history(
 | **Lasso** | `fit_lasso_model` | `models/lasso_model.Rmd` |
 | **Random Forest** | `predict_alpha_rf` | `models/RF.Rmd` |
 | **XGBoost** | `predict_alpha_xgb` | `models/XGBoost.Rmd` |
-| **FNN (H2O)** | `predict_alpha_nn_h2o` | `models/FNN.Rmd` |
-| **RNN (LSTM)** | `predict_alpha_rnn` | `models/RNN.Rmd` |
+| **FNN** * | `predict_alpha_nn_h2o` | `models/FNN.Rmd` |
+| **RNN** | `predict_alpha_rnn` | `models/RNN.Rmd` |
+
+\* Note that for FNN, you will need to load the ```Set Preferences``` and ```Initialise H2O``` code blocks, on top of the libraries.
 
 ### 3. Run the script
 Run the entire model_evaluation/portfolio_evaluation_v2.2.Rmd script. Subsequently, the equity plots and model performance metrics will be generated.
