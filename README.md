@@ -11,6 +11,26 @@ dse4101_mutual_funds/
 └── figures/                 # Visualisations of SHAP values and performance
 ```
 
+## Installation and Setup 
+To ensure reproducibility, install all required R packages before running the project:
+```r
+required_packages <- required_packages <- c(
+  "tidyverse", "data.table", "lubridate",
+  "caret", "glmnet", "randomForest", "xgboost", "h2o",
+  "keras3", "tensorflow", "reticulate", "rBayesianOptimization",
+  "hdm", "forecast", "urca", "sandwich",
+  "fastshap", "shapviz", "SHAPforxgboost",
+  "fredr", "readxl", "zoo", "ggrepel", "corrplot"
+)
+
+installed <- rownames(installed.packages())
+
+for (pkg in required_packages) {
+  if (!(pkg %in% installed)) {
+    install.packages(pkg)
+  }
+}
+```
 ## Model Evaluation Guide
 To switch between the various machine learning models, follow these steps:
 
@@ -39,3 +59,11 @@ results <- build_top_decile_history(
 
 ### 3. Run the script
 Run the entire model_evaluation/portfolio_evaluation_v2.2.Rmd script. Subsequently, the equity plots and model performance metrics will be generated.
+
+## Replication of SHAP Figures
+To replicate the SHAP feature importance plots and other graphs in the figures/ folder for a specific model:
+1. Open the corresponding model's file in the models/ folder
+2. Run the script
+3. Generated figures will be in the figures/ folder.
+
+
