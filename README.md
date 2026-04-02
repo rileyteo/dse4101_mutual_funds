@@ -14,13 +14,13 @@ dse4101_mutual_funds/
 ## Installation and Setup 
 To ensure reproducibility, install all required R packages before running the project:
 ```r
-required_packages <- required_packages <- c(
+required_packages <- c(
   "tidyverse", "data.table", "lubridate",
   "caret", "glmnet", "randomForest", "xgboost", "h2o",
   "keras3", "tensorflow", "reticulate", "rBayesianOptimization",
-  "hdm", "forecast", "urca", "sandwich",
+  "hdm", "forecast", "urca", "sandwich", "lmtest",
   "fastshap", "shapviz", "SHAPforxgboost",
-  "fredr", "readxl", "zoo", "ggrepel", "corrplot"
+  "fredr", "readxl", "zoo", "ggrepel", "corrplot", "conflicted"
 )
 
 installed <- rownames(installed.packages())
