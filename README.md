@@ -17,8 +17,8 @@ To switch between the various machine learning models, follow these steps:
 ### 1. Open the model file
 Open the specific model file in the models/ folder (e.g., RF.Rmd or RNN.Rmd). Load the required libraries at the top of each model's script.
 
-### 2. Configure the Backtest
-Open model_evaluation/portfolio_evaluation_v2.2.Rmd. Locate the build_top_decile_history function call. You must update the model_fn argument to match the architecture you wish to test:
+### 2. Configure the model inside the portfolio evaluation script
+Open model_evaluation/portfolio_evaluation_v2.2.Rmd. Locate the predict_alpha_...function and replace it with the respective model's function (documented in the table below). Then, locate the build_top_decile_history function call. Note that you must also update the model_fn argument to match the architecture you wish to test:
 
 #### Example: Switching to OLS
 ```r
