@@ -14,9 +14,30 @@ library(tidyverse)
 library(lubridate)
 library(h2o)
 library(caret)
+library(conflicted)
 
 df <- read_csv('../data/final_data.csv')
 ```
+
+```{r}
+# Set preferences
+conflicts_prefer(lubridate::year)
+conflicts_prefer(lubridate::month)
+conflicts_prefer(lubridate::as_date)
+
+conflicts_prefer(dplyr::filter)
+conflicts_prefer(dplyr::select)
+conflicts_prefer(dplyr::mutate)
+conflicts_prefer(dplyr::lag) 
+conflicts_prefer(dplyr::slice)
+
+conflicts_prefer(base::as.numeric)
+conflicts_prefer(base::as.vector)
+conflicts_prefer(base::round)
+conflicts_prefer(base::is.numeric)
+conflicts_prefer(base::`&&`)
+```
+
 
 ```{r}
 # Initialise h2o
