@@ -23,6 +23,7 @@ library(ggplot2)
 library(lmtest)
 library(sandwich)
 library(tibble)
+library(modelsummary)
 ```
 
 ```{r}
@@ -179,34 +180,65 @@ ols_featimp_ranking <-
 
 ols_featimp_ranking
 #ggsave("../figures/ols_shap_plot.png", width = 16, height = 12)
+```
 
+```{r}
 # ---------------------------
 # COEFFICIENT PLOT
 # ---------------------------
-plot_df <- coef_df %>%
-  filter(feature != "(Intercept)") %>%
+plot_df <- plot_df %>%
   mutate(
-    ci_lower = Estimate - 1.645 * Std_Error,
-    ci_upper = Estimate + 1.645 * Std_Error,
-    significant = ifelse(ci_lower * ci_upper > 0, "Yes", "No")
-  ) %>%
-  arrange(Estimate) %>%
-  mutate(feature = factor(feature, levels = feature))
-
-ols_coef_plot <- ggplot(plot_df, aes(x = Estimate, y = feature, shape = significant)) +
-  geom_point() +
-  geom_errorbarh(aes(xmin = ci_lower, xmax = ci_upper), height = 0.2) +
+    sig = case_when(
+      p_value < 0.01 ~ "***",
+      p_value < 0.05 ~ "**",
+      p_value < 0.10 ~ "*",
+      TRUE ~ "Insignificant"
+    )
+  )
+ols_coef_plot <- ggplot(plot_df, 
+                        aes(x = Estimate, 
+                            y = feature, 
+                            color = sig)) +
+  
+  geom_point(size = 2) +
+  
+  geom_errorbarh(aes(xmin = ci_lower, xmax = ci_upper), 
+                 height = 0.2, alpha = 0.7) +
+  
   geom_vline(xintercept = 0, linetype = "dashed") +
+  
+  scale_color_manual(values = c(
+    "***" = "#1b9e78",
+    "*"   = "#d95f02",
+    "Insignificant"  = "grey50"
+  )) +
+  
   labs(
-    title = "OLS Coefficient Plot (Clustered SE)",
+    title = "Pooled OLS Coefficient Plot (Clustered Standard Error)",
     x = "Coefficient Estimate",
-    y = "Features"
+    y = "Features",
+    color = "Significance"
   ) +
+  
   theme_minimal()
 ols_coef_plot
-#ggsave("../figures/ols_coef_plot.png", width = 16, height = 12)
+ggsave("../figures/ols_coef_plot.png", width = 16, height = 12)
 ```
 
+```{r}
+coef_latex <- coef_df %>%
+  arrange(desc(abs(t_value))) %>%
+  mutate(
+    coef_se = sprintf("%.4f (%.4f)%s", Estimate, Std_Error, sig)
+  ) %>%
+  select(feature, coef_se)
+modelsummary(
+  list("Pooled OLS" = model),
+  vcov = vcov_tw,
+  stars = c('*' = .1, '**' = .05, '***' = .01),
+  output = "latex"
+)
+```
 
 
 
