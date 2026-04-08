@@ -1,5 +1,5 @@
 ---
-title: "OLS and Elastic Net"
+title: "OLS"
 author: "Erica"
 date: "2026-03-11"
 output: html_document
@@ -13,7 +13,6 @@ knitr::opts_chunk$set(
 )
 ```   
 
-
 ```{r}
 #load library
 library(dplyr)
@@ -22,8 +21,9 @@ library(lubridate)
 library(glmnet)
 library(ggplot2)
 library(lmtest)
+library(sandwich)
+library(tibble)
 ```
-
 
 ```{r}
 #read in data
@@ -74,7 +74,9 @@ predict_alpha_ols <- function(train_df){
 
 ## feature importance of OLS
 ```{r}
-# preprocess
+# ---------------------------
+# PREPROCESS
+# ---------------------------
 df <- df %>%
   mutate(
     caldt = as.Date(caldt),
@@ -83,79 +85,86 @@ df <- df %>%
   arrange(year, crsp_fundno) %>%
   drop_na()
 
-# train-test split
-train_df <- df %>% filter(year <= 2024, year >= 2004)
+train_df <- df %>% filter(year <= 2025, year >= 2004)
 
-predict_alpha_ols_with_model <- function(train_df){
-  
-  df <- train_df %>%
-    mutate(
-      caldt = as.Date(caldt),
-      year = lubridate::year(caldt)
-    ) %>%
-    arrange(year, crsp_fundno) %>%
-    drop_na()
+# ---------------------------
+# FIT POOLED OLS
+# ---------------------------
+df_model <- train_df %>%
+  arrange(year, crsp_fundno)
 
-  evaluation_year <- max(df$year)
+evaluation_year <- max(df_model$year)
 
-  train_data <- df %>% filter(year < evaluation_year)
+train_data <- df_model %>%
+  filter(year < evaluation_year)
 
-  feature_names <- train_data %>%
-    select(-alpha_ann, -crsp_fundno, -caldt, -year) %>%
-    colnames()
+feature_names <- train_data %>%
+  select(-alpha_ann, -crsp_fundno, -caldt, -year) %>%
+  colnames()
 
-  formula <- as.formula(
-    paste("alpha_ann ~", paste(feature_names, collapse = " + "))
-  )
+formula <- as.formula(
+  paste("alpha_ann ~", paste(feature_names, collapse = " + "))
+)
 
-  model <- lm(formula, data = train_data)
+model <- lm(formula, data = train_data)
 
-  return(list(
-    model = model,
-    train_data = train_data,
-    feature_names = feature_names
-  ))
-}
+# ---------------------------
+# CLUSTERED SE TABLE
+# ---------------------------
+# clustered vcov (FIXED input)
+vcov_tw <- vcovCL(
+  model,
+  cluster = list(train_data$crsp_fundno, train_data$year)
+)
 
-ols_output <- predict_alpha_ols_with_model(train_df)
+# extract coefficients
+beta <- coef(model)
 
-model <- ols_output$model
-train_data <- ols_output$train_data
-feature_names <- ols_output$feature_names
+# extract clustered SE
+se <- sqrt(diag(vcov_tw))
 
-X_train <- train_data %>% 
-  select(all_of(feature_names)) %>% 
+# build dataframe directly
+coef_df <- tibble(
+  feature = names(beta),
+  Estimate = beta,
+  Std_Error = se
+) %>%
+  mutate(
+    t_value = Estimate / Std_Error,
+    p_value = 2 * (1 - pnorm(abs(t_value))),
+    sig = case_when(
+      p_value < 0.01 ~ "***",
+      p_value < 0.05 ~ "**",
+      p_value < 0.10 ~ "*",
+      TRUE ~ ""
+    )
+  ) %>%
+  arrange(desc(abs(t_value)))
+coef_df
+
+# ---------------------------
+# SHAP (OLS = linear SHAP)
+# ---------------------------
+X_train <- train_data %>%
+  select(all_of(feature_names)) %>%
   as.matrix()
 
-# ---------------------------
-# SHAP
-# ---------------------------
-
-coefs <- coef(model)[-1]
-
-# ensure alignment
-coefs <- coefs[colnames(X_train)]
-
+coefs <- coef(model)[feature_names]
 mu <- colMeans(X_train)
 
-# SHAP = beta * (x - mean)
 shap_values <- sweep(X_train, 2, mu, "-") %>%
   sweep(2, coefs, "*") %>%
   as.data.frame()
 
-# feature importance
-abs_shap <- abs(shap_values)
-abs_shap_mean <- colMeans(abs_shap) %>%
-  sort(decreasing = TRUE)
+importance_df <- colMeans(abs(shap_values)) %>%
+  sort(decreasing = TRUE) %>%
+  enframe(name = "feature", value = "importance")
 
-importance_df <- tibble(
-  feature = names(abs_shap_mean),
-  importance = abs_shap_mean
-)
-
-# plot
-ols_featimp_ranking <- 
-  ggplot(importance_df, 
+# ---------------------------
+# SHAP PLOT
+# ---------------------------
+ols_featimp_ranking <-
+  ggplot(importance_df,
          aes(y = reorder(feature, importance),
              x = importance,
              fill = importance)) +
@@ -169,8 +178,33 @@ ols_featimp_ranking <-
   theme_minimal()
 
 ols_featimp_ranking
+#ggsave("../figures/ols_shap_plot.png", width = 16, height = 12)
 
-ggsave("../figures/ols_shap_plot.png", width = 16, height = 12)
+# ---------------------------
+# COEFFICIENT PLOT
+# ---------------------------
+plot_df <- coef_df %>%
+  filter(feature != "(Intercept)") %>%
+  mutate(
+    ci_lower = Estimate - 1.645 * Std_Error,
+    ci_upper = Estimate + 1.645 * Std_Error,
+    significant = ifelse(ci_lower * ci_upper > 0, "Yes", "No")
+  ) %>%
+  arrange(Estimate) %>%
+  mutate(feature = factor(feature, levels = feature))
+
+ols_coef_plot <- ggplot(plot_df, aes(x = Estimate, y = feature, shape = significant)) +
+  geom_point() +
+  geom_errorbarh(aes(xmin = ci_lower, xmax = ci_upper), height = 0.2) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(
+    title = "OLS Coefficient Plot (Clustered SE)",
+    x = "Coefficient Estimate",
+    y = "Features"
+  ) +
+  theme_minimal()
+ols_coef_plot
+#ggsave("../figures/ols_coef_plot.png", width = 16, height = 12)
 ```
 
 
