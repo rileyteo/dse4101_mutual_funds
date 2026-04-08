@@ -222,7 +222,7 @@ ols_coef_plot <- ggplot(plot_df,
   
   theme_minimal()
 ols_coef_plot
-ggsave("../figures/ols_coef_plot.png", width = 16, height = 12)
+#ggsave("../figures/ols_coef_plot.png", width = 16, height = 12)
 ```
 
 ```{r}
