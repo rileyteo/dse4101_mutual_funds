@@ -58,7 +58,7 @@ unique_fundno <- df_eq70 %>% distinct(crsp_fundno)
 
 
 #read in monthly returns data
-file_path = "../data/monthly_returns.csv"
+file_path = "../data/tech_monthly_returns.csv"
 df_returns = read.csv(file_path) 
 df_returns = df_returns %>% mutate(caldt = dmy(caldt)) %>% mutate(caldt = as.Date(caldt))
 
@@ -269,26 +269,6 @@ value_added_ann <- df_monthly_exp %>%
 # join with other annual features
 df_final = df_final %>% 
   left_join(value_added_ann, by = c("crsp_fundno", "year")) %>% select(-year)
-  
-
-
-#standardise columns (according to author, standardise across funds in 1 year and imputing NA values with 0 is ok)
-# Standardising will be done in expanding window function in evaluation file
-
-# df_std <- df_final %>%
-#   mutate(year = year(caldt)) %>%
-#   group_by(year) %>%
-#   mutate(across(
-#     .cols = where(is.numeric) & !any_of(c("year", "crsp_fundno")),   # standardize all numeric except year
-#     .fns  = ~ {
-#       mu <- mean(.x, na.rm = TRUE)
-#       sdv <- sd(.x, na.rm = TRUE)
-#       z <- (.x - mu) / sdv
-#       z[is.na(z)] <- 0
-#       z
-#     }
-#   )) %>%
-#   ungroup() %>% select(-year)
 
 df_final <- df_final %>%
   mutate(year = year(caldt)) %>% select (-n_months)
@@ -338,4 +318,140 @@ funds_per_year <- df_ml %>%
   arrange(year)
 
 
+#For report EDA
+# Compute yearly mean and SD of alpha_ann
+alpha_summary <- df_ml %>%
+  mutate(year = year(caldt)) %>%
+  group_by(year) %>%
+  summarise(
+    mean_alpha = mean(alpha_ann, na.rm = TRUE),
+    sd_alpha   = sd(alpha_ann, na.rm = TRUE),
+    .groups = "drop"
+  )
 
+# Plot
+ggplot(alpha_summary, aes(x = year, y = mean_alpha)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red", linewidth = 0.5) +
+  geom_errorbar(
+    aes(ymin = mean_alpha - sd_alpha,
+        ymax = mean_alpha + sd_alpha),
+    width = 0.2, linewidth = 0.5
+  ) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 3, fill = "black", 
+             shape = 21, stroke = 1.2) +
+  scale_x_continuous(breaks = seq(2004, 2025, 1)) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(title = "Mean Annualised Alpha Across Funds",
+    x = "Year",
+    y = "Mean Annualised Alpha",
+    caption = "Error bars represent ± 1 standard deviation across funds"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 11, face = "bold"),
+    plot.caption = element_text(hjust = 0, size = 9, color = "grey40"),
+    axis.title = element_text(size = 10),
+    axis.text = element_text(size = 9),
+    panel.grid.minor = element_blank()
+  )
+
+ggsave("alpha_mean_sd2.png", width = 8, height = 5, dpi = 300)
+
+library(ggplot2)
+library(dplyr)
+library(lubridate)
+library(reshape2)
+
+# Select and rename variables from df_ml (lagged predictors vs alpha_ann)
+df_corr <- df_ml %>%
+  mutate(year = year(caldt)) %>%
+  select(
+    alpha_ann,
+    alpha_ann_lag,
+    alpha_t_lag,
+    tna_latest_lag,
+    exp_ratio_lag,
+    age_months_lag,
+    flow_ann_lag,
+    manager_tenure_lag,
+    turn_ratio_lag,
+    flowvol_ann_lag,
+    value_added_ann_lag,
+    mktrf_t_lag,
+    rmw_t_lag,
+    cma_t_lag,
+    smb_t_lag,
+    hml_t_lag,
+    umd_t_lag,
+    r2_lag
+  ) %>%
+  rename(
+    `realized alpha (target variable)` = alpha_ann,
+    `realized alpha lagged` = alpha_ann_lag,
+    `alpha (intercept t-stat) lagged` = alpha_t_lag,
+    `total net assets lagged` = tna_latest_lag,
+    `expense ratio lagged`= exp_ratio_lag,
+    `age lagged` = age_months_lag,
+    `flows lagged` = flow_ann_lag,
+    `manager tenure lagged` = manager_tenure_lag,
+    `turnover ratio lagged` = turn_ratio_lag,
+    `vol. of flows lagged` = flowvol_ann_lag,
+    `value added lagged` = value_added_ann_lag,
+    `market beta t-stat lagged` = mktrf_t_lag,
+    `profit. beta t-stat lagged` = rmw_t_lag,
+    `invest. beta t-stat lagged` = cma_t_lag,
+    `size beta t-stat lagged` = smb_t_lag,
+    `value beta t-stat lagged` = hml_t_lag,
+    `momentum beta t-stat lagged` = umd_t_lag,
+    `R2 lagged` = r2_lag
+  )
+
+# Compute correlation matrix
+corr_matrix <- cor(df_corr, use = "pairwise.complete.obs")
+
+# Round to 2 decimal places
+corr_matrix_rounded <- round(corr_matrix, 2)
+
+# Melt to long format for ggplot
+corr_melted <- melt(corr_matrix_rounded)
+
+# Keep only lower triangle
+corr_melted <- corr_melted %>%
+  filter(as.integer(Var1) > as.integer(Var2))
+
+# Fix factor levels to match order
+var_order <- colnames(corr_matrix)
+corr_melted$Var1 <- factor(corr_melted$Var1, levels = var_order)
+corr_melted$Var2 <- factor(corr_melted$Var2, levels = var_order)
+
+# Plot
+ggplot(corr_melted, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile(color = "white") +
+  geom_text(
+    aes(label = ifelse(abs(value) > 0, value, "0")),
+    size = 2.5,
+    fontface = "bold"
+  ) +
+  scale_fill_gradientn(
+    colours  = c("#2166AC", "white", "#B2182B"),
+    limits   = c(-1, 1),
+    name     = ""
+  ) +
+  scale_x_discrete(position = "top") +
+  labs(
+    title = "Correlation Matrix of Predictor Variables and Realised Alpha"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 0, size = 7, color = "black"),
+    axis.text.y = element_text(size = 7, color = "black"),
+    axis.title = element_blank(),
+    plot.title = element_text(hjust = 0.5, size = 10, 
+                                    face = "bold"),
+    legend.position = "right",
+    legend.key.height = unit(2, "cm"),
+    panel.grid = element_blank()
+  )
+
+ggsave("correlation_matrix.png", width = 12, height = 10, bg="white")
